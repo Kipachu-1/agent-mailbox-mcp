@@ -28,6 +28,7 @@ test(
 
       const tools = await client.listTools();
       const names = tools.tools.map((tool) => tool.name);
+      expect(names).toContain("session_start");
       expect(names).toContain("send_message");
       expect(names).toContain("reply_message");
       expect(names).toContain("watch_updates");
@@ -54,6 +55,15 @@ test(
       });
       expect(inbox.isError).not.toBe(true);
       expect(JSON.stringify(inbox.structuredContent)).toContain("hello from stdio");
+
+      const session = await client.callTool({
+        name: "session_start",
+        arguments: {
+          channel: "smoke",
+        },
+      });
+      expect(session.isError).not.toBe(true);
+      expect(JSON.stringify(session.structuredContent)).toContain("recommended_next_steps");
 
       const note = await client.callTool({
         name: "write_note",

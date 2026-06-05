@@ -233,6 +233,7 @@ export interface ListTasksOptions {
   creatorId?: string;
   channel?: string;
   parentTaskId?: string;
+  staleAfterSeconds?: number;
   limit?: number;
 }
 
@@ -646,6 +647,11 @@ export class LocalCommsStore {
       clauses.push("parent_task_id = ?");
       params.push(options.parentTaskId);
     }
+    if (options.staleAfterSeconds !== undefined) {
+      clauses.push("status = 'claimed'");
+      clauses.push("updated_at <= ?");
+      params.push(new Date(Date.now() - durationSeconds(options.staleAfterSeconds) * 1000).toISOString());
+    }
 
     params.push(limit(options.limit));
     return this.all<TaskRow>(
@@ -657,23 +663,35 @@ export class LocalCommsStore {
     ).map((row) => this.taskWithRelations(row));
   }
 
-  claimTask(agentId: string, taskId: string, note?: string): TaskRecord {
+  claimTask(agentId: string, taskId: string, note?: string, workspace?: string): TaskRecord {
     const now = isoNow();
+    const scope = workspace ? workspaceOf(workspace) : undefined;
+    const workspaceClause = scope ? "AND workspace = ?" : "";
+    const params: SQLQueryBindings[] = [agentId, now, taskId];
+    if (scope) {
+      params.push(scope);
+    }
+    params.push(agentId);
+
     this.exec("BEGIN IMMEDIATE");
     try {
       const result = this.run(
         `UPDATE tasks
          SET assignee_id = ?, status = 'claimed', updated_at = ?
          WHERE id = ?
+           ${workspaceClause}
            AND status = 'open'
            AND (assignee_id IS NULL OR assignee_id = ?)`,
-        [agentId, now, taskId, agentId],
+        params,
       );
 
       if (result.changes === 0) {
         const existing = this.getTask(taskId);
         if (!existing) {
           throw new Error(`Task '${taskId}' does not exist.`);
+        }
+        if (scope && existing.workspace !== scope) {
+          throw new Error(`Task '${taskId}' is not in workspace '${scope}'.`);
         }
         throw new Error(`Task '${taskId}' cannot be claimed from status '${existing.status}'.`);
       }
@@ -694,17 +712,25 @@ export class LocalCommsStore {
 
   updateTask(input: UpdateTaskInput): TaskRecord {
     const now = isoNow();
+    let shouldNotifyCreator = false;
     this.exec("BEGIN IMMEDIATE");
     try {
       const existing = this.getTask(input.taskId);
       if (!existing) {
         throw new Error(`Task '${input.taskId}' does not exist.`);
       }
+      if (input.workspace && existing.workspace !== workspaceOf(input.workspace)) {
+        throw new Error(`Task '${input.taskId}' is not in workspace '${workspaceOf(input.workspace)}'.`);
+      }
 
       const priority = input.priority ?? existing.priority;
       const dueAt = input.dueAt === undefined ? existing.due_at : emptyToNull(input.dueAt);
       const blockedReason =
         input.blockedReason === undefined ? existing.blocked_reason : emptyToNull(input.blockedReason);
+      shouldNotifyCreator =
+        input.agentId !== existing.creator_id &&
+        existing.status !== input.status &&
+        shouldNotifyForStatus(input.status);
 
       this.run(
         `UPDATE tasks
@@ -722,6 +748,9 @@ export class LocalCommsStore {
     const task = this.getTask(input.taskId);
     if (!task) {
       throw new Error(`Task '${input.taskId}' disappeared after updating.`);
+    }
+    if (shouldNotifyCreator) {
+      this.sendTaskStatusNotification(input.agentId, task, input.note);
     }
     return task;
   }
@@ -1051,6 +1080,35 @@ export class LocalCommsStore {
     }
   }
 
+  private sendTaskStatusNotification(agentId: string, task: TaskRecord, note?: string): void {
+    if (agentId === task.creator_id) {
+      return;
+    }
+
+    const statusLabel = task.status === "done" ? "completed" : task.status;
+    const noteText = note?.trim() ? `\n\nNote: ${note.trim()}` : "";
+    this.sendMessage({
+      senderId: agentId,
+      workspace: task.workspace,
+      recipientId: task.creator_id,
+      body: `Task ${statusLabel}: ${task.title}${noteText}`,
+      metadata: {
+        system_generated: true,
+        event_type: "task_status_notification",
+        task_id: task.id,
+        task_status: task.status,
+      },
+      artifacts: task.artifacts.map((artifact) => ({
+        type: artifact.type,
+        label: artifact.label ?? undefined,
+        path: artifact.path ?? undefined,
+        url: artifact.url ?? undefined,
+        line: artifact.line ?? undefined,
+        metadata: artifact.metadata,
+      })),
+    });
+  }
+
   private messageWithRelations(row: MessageRow, agentId: string): MessageRecord {
     return {
       ...mapMessage(row, agentId),
@@ -1347,4 +1405,15 @@ function ttlSeconds(value: number | undefined): number {
     return 900;
   }
   return Math.min(Math.max(Math.trunc(value), 1), 86_400);
+}
+
+function durationSeconds(value: number): number {
+  if (!Number.isFinite(value) || value <= 0) {
+    return 3_600;
+  }
+  return Math.min(Math.trunc(value), 2_592_000);
+}
+
+function shouldNotifyForStatus(status: TaskStatus): boolean {
+  return status === "done" || status === "blocked" || status === "cancelled";
 }

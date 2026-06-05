@@ -47,6 +47,7 @@ try {
           workspace,
           status: stringFlag(args, "status") as TaskStatus | undefined,
           channel: stringFlag(args, "channel"),
+          staleAfterSeconds: numberFlag(args, "stale-after-seconds"),
           limit: numberFlag(args, "limit"),
         }),
       });
@@ -221,7 +222,7 @@ Common commands:
   bun run cli inbox [--channel handoffs] [--unread]
   bun run cli send --to claude-code "please review this"
   bun run cli send --channel handoffs "status update"
-  bun run cli tasks [--status open]
+  bun run cli tasks [--status open] [--stale-after-seconds 3600]
   bun run cli create-task --channel docs --title "Review README"
   bun run cli claim-task <task-id>
   bun run cli update-task <task-id> --status done --note "finished"

@@ -1,4 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -81,6 +82,7 @@ test("task updates append audit events", () => {
     creatorId: "codex",
     title: "Review README",
     channel: "docs",
+    artifacts: [{ type: "file", path: "/tmp/README.md", line: 1, label: "README" }],
   });
 
   store.claimTask("claude", task.id, "Taking this.");
@@ -99,6 +101,15 @@ test("task updates append audit events", () => {
     "status_changed",
   ]);
   expect(events.at(-1)?.note).toBe("README updated.");
+
+  const notifications = store.inbox("codex", { unreadOnly: true });
+  const metadata = notifications[0]?.metadata as Record<string, unknown> | undefined;
+  expect(notifications[0]?.recipient_id).toBe("codex");
+  expect(notifications[0]?.sender_id).toBe("claude");
+  expect(notifications[0]?.body).toContain("Task completed: Review README");
+  expect(metadata?.event_type).toBe("task_status_notification");
+  expect(metadata?.task_id).toBe(task.id);
+  expect(notifications[0]?.artifacts[0]?.path).toBe("/tmp/README.md");
 
   store.close();
 });
@@ -253,6 +264,48 @@ test("locks enforce workspace-scoped leases", () => {
 
   store.releaseLock("codex", "src/store.ts");
   expect(store.listLocks()).toHaveLength(0);
+
+  store.close();
+});
+
+test("stale claimed tasks are visible for reclamation checks", () => {
+  const { path } = tempDb();
+  const store = new LocalCommsStore(path);
+  const task = store.createTask({
+    creatorId: "codex",
+    title: "Possibly abandoned task",
+  });
+
+  store.claimTask("claude", task.id, "Starting.");
+  expect(store.listTasks("codex", { staleAfterSeconds: 3_600 }).map((item) => item.id)).not.toContain(
+    task.id,
+  );
+
+  const db = new Database(path);
+  db.query(`UPDATE tasks SET updated_at = ? WHERE id = ?`).run(
+    "2000-01-01T00:00:00.000Z",
+    task.id,
+  );
+  db.close();
+
+  expect(store.listTasks("codex", { staleAfterSeconds: 3_600 }).map((item) => item.id)).toContain(
+    task.id,
+  );
+
+  store.close();
+});
+
+test("claim_task respects workspace scope when provided", () => {
+  const { path } = tempDb();
+  const store = new LocalCommsStore(path);
+  const task = store.createTask({
+    creatorId: "codex",
+    workspace: "repo-a",
+    title: "Repo A task",
+  });
+
+  expect(() => store.claimTask("claude", task.id, undefined, "repo-b")).toThrow(/not in workspace/);
+  expect(store.claimTask("claude", task.id, undefined, "repo-a").assignee_id).toBe("claude");
 
   store.close();
 });

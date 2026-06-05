@@ -13,7 +13,15 @@ export function createLocalCommsMcpServer(store: LocalCommsStore, agent: AgentCo
     },
     {
       instructions:
-        "Use these tools to coordinate with local AI agents through a shared SQLite mailbox.",
+        [
+          "Use these tools to coordinate with local AI agents through a shared SQLite mailbox.",
+          "At the start of each work session, call session_start before editing or claiming work; it refreshes presence and returns unread messages, tasks, locks, pinned notes, and stale claims.",
+          "This server is pull-based: agents only see changes when they call inbox, watch_updates, session_start, list_tasks, or related tools.",
+          "Before editing a shared file or module, call acquire_lock for that resource; release_lock when finished and renew with heartbeat or acquire_lock during long edits.",
+          "When handing off work, attach artifacts for the relevant files, URLs, diffs, screenshots, logs, or commands.",
+          "When finishing, blocking, or cancelling a task, call update_task with a specific note; the task creator is notified automatically.",
+          "Use a distinct workspace per repository or project so unrelated agents do not share task, note, message, and lock state.",
+        ].join(" "),
     },
   );
 
