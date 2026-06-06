@@ -268,6 +268,35 @@ test("locks enforce workspace-scoped leases", () => {
   store.close();
 });
 
+test("access keys authenticate by token and can be revoked", () => {
+  const { path } = tempDb();
+  const store = new LocalCommsStore(path);
+
+  const created = store.createAccessKey({
+    name: "Codex HTTP",
+    agentId: "codex",
+    agentName: "Codex",
+    workspace: "mcp",
+    token: "known-token",
+  });
+
+  expect(created.token).toBe("known-token");
+  expect(created.key.token_prefix).toContain("...");
+  expect(store.listAccessKeys()[0]?.token_prefix).toBe(created.key.token_prefix);
+
+  const authenticated = store.authenticateAccessToken("known-token");
+  expect(authenticated?.agent_id).toBe("codex");
+  expect(authenticated?.workspace).toBe("mcp");
+  expect(authenticated?.last_used_at).toBeString();
+  expect(store.authenticateAccessToken("wrong-token")).toBeNull();
+
+  const revoked = store.revokeAccessKey(created.key.id);
+  expect(revoked.enabled).toBe(false);
+  expect(store.authenticateAccessToken("known-token")).toBeNull();
+
+  store.close();
+});
+
 test("stale claimed tasks are visible for reclamation checks", () => {
   const { path } = tempDb();
   const store = new LocalCommsStore(path);

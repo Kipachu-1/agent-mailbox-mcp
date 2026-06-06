@@ -122,6 +122,24 @@ export interface LockRecord {
   expired: boolean;
 }
 
+export interface AccessKeyRecord {
+  id: string;
+  name: string;
+  token_prefix: string;
+  agent_id: string;
+  agent_name: string;
+  workspace: string;
+  enabled: boolean;
+  last_used_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreatedAccessKeyRecord {
+  key: AccessKeyRecord;
+  token: string;
+}
+
 export interface UpdatesRecord {
   since: string;
   checked_at: string;
@@ -163,6 +181,11 @@ interface NoteRow extends Omit<NoteRecord, "metadata" | "artifacts" | "pinned"> 
 }
 
 interface LockRow extends Omit<LockRecord, "expired"> {}
+
+interface AccessKeyRow extends Omit<AccessKeyRecord, "enabled"> {
+  token_hash: string;
+  enabled: number;
+}
 
 export interface RegisterAgentInput {
   id: string;
@@ -280,6 +303,14 @@ export interface ListLocksOptions {
   workspace?: string;
   includeExpired?: boolean;
   resource?: string;
+}
+
+export interface CreateAccessKeyInput {
+  name: string;
+  agentId: string;
+  agentName?: string;
+  workspace?: string;
+  token?: string;
 }
 
 export class LocalCommsStore {
@@ -663,6 +694,43 @@ export class LocalCommsStore {
     ).map((row) => this.taskWithRelations(row));
   }
 
+  listAllTasks(options: Omit<ListTasksOptions, "assigneeId" | "creatorId"> = {}): TaskRecord[] {
+    const clauses: string[] = [];
+    const params: SQLQueryBindings[] = [];
+
+    if (options.workspace) {
+      clauses.push("workspace = ?");
+      params.push(workspaceOf(options.workspace));
+    }
+    if (options.status) {
+      clauses.push("status = ?");
+      params.push(options.status);
+    }
+    if (options.channel) {
+      clauses.push("channel = ?");
+      params.push(options.channel);
+    }
+    if (options.parentTaskId) {
+      clauses.push("parent_task_id = ?");
+      params.push(options.parentTaskId);
+    }
+    if (options.staleAfterSeconds !== undefined) {
+      clauses.push("status = 'claimed'");
+      clauses.push("updated_at <= ?");
+      params.push(new Date(Date.now() - durationSeconds(options.staleAfterSeconds) * 1000).toISOString());
+    }
+
+    const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+    params.push(limit(options.limit));
+    return this.all<TaskRow>(
+      `SELECT * FROM tasks
+       ${where}
+       ORDER BY priority DESC, updated_at DESC
+       LIMIT ?`,
+      params,
+    ).map((row) => this.taskWithRelations(row));
+  }
+
   claimTask(agentId: string, taskId: string, note?: string, workspace?: string): TaskRecord {
     const now = isoNow();
     const scope = workspace ? workspaceOf(workspace) : undefined;
@@ -834,6 +902,24 @@ export class LocalCommsStore {
     ).map((row) => this.noteWithRelations(row));
   }
 
+  listAllNotes(options: Omit<ReadNotesOptions, "workspace" | "channel" | "query"> = {}): NoteRecord[] {
+    const clauses: string[] = [];
+    const params: SQLQueryBindings[] = [];
+    if (options.pinnedOnly) {
+      clauses.push("pinned = 1");
+    }
+
+    const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+    params.push(limit(options.limit));
+    return this.all<NoteRow>(
+      `SELECT * FROM notes
+       ${where}
+       ORDER BY pinned DESC, updated_at DESC
+       LIMIT ?`,
+      params,
+    ).map((row) => this.noteWithRelations(row));
+  }
+
   pinNote(noteId: string, pinned: boolean): NoteRecord {
     this.run(`UPDATE notes SET pinned = ?, updated_at = ? WHERE id = ?`, [
       pinned ? 1 : 0,
@@ -950,6 +1036,106 @@ export class LocalCommsStore {
     ).map(mapLock);
   }
 
+  listAllLocks(options: Pick<ListLocksOptions, "includeExpired"> = {}): LockRecord[] {
+    const clauses: string[] = [];
+    const params: SQLQueryBindings[] = [];
+    if (!options.includeExpired) {
+      clauses.push("expires_at > ?");
+      params.push(isoNow());
+    }
+    const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+
+    return this.all<LockRow>(
+      `SELECT * FROM locks
+       ${where}
+       ORDER BY updated_at DESC`,
+      params,
+    ).map(mapLock);
+  }
+
+  createAccessKey(input: CreateAccessKeyInput): CreatedAccessKeyRecord {
+    const now = isoNow();
+    const token = input.token?.trim() || generateAccessToken();
+    const id = crypto.randomUUID();
+    const keyName = input.name.trim();
+    const agentId = input.agentId.trim();
+    const agentName = input.agentName?.trim() || agentId;
+    const workspace = workspaceOf(input.workspace);
+    if (!keyName) {
+      throw new Error("Access key name is required.");
+    }
+    if (!agentId) {
+      throw new Error("Access key agent id is required.");
+    }
+    if (!token) {
+      throw new Error("Access key token is required.");
+    }
+    const hash = tokenHash(token);
+
+    this.run(
+      `INSERT INTO access_keys
+         (id, token_hash, token_prefix, name, agent_id, agent_name, workspace, enabled, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+       ON CONFLICT(token_hash) DO UPDATE SET
+         name = excluded.name,
+         agent_id = excluded.agent_id,
+         agent_name = excluded.agent_name,
+         workspace = excluded.workspace,
+         enabled = 1,
+         updated_at = excluded.updated_at`,
+      [
+        id,
+        hash,
+        tokenPrefix(token),
+        keyName,
+        agentId,
+        agentName,
+        workspace,
+        now,
+        now,
+      ],
+    );
+
+    const key = this.getAccessKeyByHash(hash);
+    if (!key) {
+      throw new Error(`Failed to create access key '${id}'.`);
+    }
+    return { key, token };
+  }
+
+  listAccessKeys(): AccessKeyRecord[] {
+    return this.all<AccessKeyRow>(
+      `SELECT * FROM access_keys ORDER BY updated_at DESC, created_at DESC`,
+      [],
+    ).map(mapAccessKey);
+  }
+
+  authenticateAccessToken(token: string): AccessKeyRecord | null {
+    const row = this.get<AccessKeyRow>(
+      `SELECT * FROM access_keys WHERE token_hash = ? AND enabled = 1`,
+      [tokenHash(token)],
+    );
+    if (!row) {
+      return null;
+    }
+
+    this.run(`UPDATE access_keys SET last_used_at = ?, updated_at = ? WHERE id = ?`, [
+      isoNow(),
+      isoNow(),
+      row.id,
+    ]);
+    return this.getAccessKey(row.id);
+  }
+
+  revokeAccessKey(id: string): AccessKeyRecord {
+    this.run(`UPDATE access_keys SET enabled = 0, updated_at = ? WHERE id = ?`, [isoNow(), id]);
+    const key = this.getAccessKey(id);
+    if (!key) {
+      throw new Error(`Access key '${id}' does not exist.`);
+    }
+    return key;
+  }
+
   updatesSince(agentId: string, workspace?: string, since?: string): UpdatesRecord {
     const scope = workspaceOf(workspace);
     const sinceValue = since?.trim() || "1970-01-01T00:00:00.000Z";
@@ -1019,6 +1205,16 @@ export class LocalCommsStore {
       [workspace, resource],
     );
     return row ? mapLock(row) : null;
+  }
+
+  private getAccessKey(id: string): AccessKeyRecord | null {
+    const row = this.get<AccessKeyRow>(`SELECT * FROM access_keys WHERE id = ?`, [id]);
+    return row ? mapAccessKey(row) : null;
+  }
+
+  private getAccessKeyByHash(hash: string): AccessKeyRecord | null {
+    const row = this.get<AccessKeyRow>(`SELECT * FROM access_keys WHERE token_hash = ?`, [hash]);
+    return row ? mapAccessKey(row) : null;
   }
 
   private insertTaskEvent(
@@ -1247,6 +1443,20 @@ export class LocalCommsStore {
         updated_at TEXT NOT NULL,
         UNIQUE(workspace, resource)
       );
+
+      CREATE TABLE IF NOT EXISTS access_keys (
+        id TEXT PRIMARY KEY,
+        token_hash TEXT NOT NULL UNIQUE,
+        token_prefix TEXT NOT NULL,
+        name TEXT NOT NULL,
+        agent_id TEXT NOT NULL,
+        agent_name TEXT NOT NULL,
+        workspace TEXT NOT NULL DEFAULT 'default',
+        enabled INTEGER NOT NULL DEFAULT 1,
+        last_used_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
     `);
 
     this.ensureColumn("agents", "workspace", "TEXT NOT NULL DEFAULT 'default'");
@@ -1274,6 +1484,7 @@ export class LocalCommsStore {
       CREATE INDEX IF NOT EXISTS idx_artifacts_owner ON artifacts(owner_type, owner_id);
       CREATE INDEX IF NOT EXISTS idx_notes_workspace_channel_updated ON notes(workspace, channel, updated_at);
       CREATE INDEX IF NOT EXISTS idx_locks_workspace_resource ON locks(workspace, resource);
+      CREATE INDEX IF NOT EXISTS idx_access_keys_agent_workspace ON access_keys(agent_id, workspace);
     `);
   }
 
@@ -1365,6 +1576,21 @@ function mapLock(row: LockRow): LockRecord {
   };
 }
 
+function mapAccessKey(row: AccessKeyRow): AccessKeyRecord {
+  return {
+    id: row.id,
+    name: row.name,
+    token_prefix: row.token_prefix,
+    agent_id: row.agent_id,
+    agent_name: row.agent_name,
+    workspace: row.workspace || "default",
+    enabled: Boolean(row.enabled),
+    last_used_at: row.last_used_at ?? null,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
 function encodeJson(value: unknown): string {
   return JSON.stringify(value ?? {});
 }
@@ -1416,4 +1642,22 @@ function durationSeconds(value: number): number {
 
 function shouldNotifyForStatus(status: TaskStatus): boolean {
   return status === "done" || status === "blocked" || status === "cancelled";
+}
+
+function generateAccessToken(): string {
+  return `amb_${crypto.randomUUID().replaceAll("-", "")}${crypto.randomUUID().replaceAll("-", "")}`;
+}
+
+function tokenHash(token: string): string {
+  return new Bun.CryptoHasher("sha256").update(token).digest("hex");
+}
+
+function tokenPrefix(token: string): string {
+  if (token.length <= 8) {
+    return `${token.slice(0, 2)}...${token.slice(-2)}`;
+  }
+  if (token.length <= 12) {
+    return `${token.slice(0, 4)}...${token.slice(-2)}`;
+  }
+  return `${token.slice(0, 8)}...${token.slice(-4)}`;
 }
