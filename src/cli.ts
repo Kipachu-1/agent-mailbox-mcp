@@ -211,7 +211,7 @@ function print(value: unknown): void {
 }
 
 function usage(): void {
-  console.log(`BeeAI Local Comms CLI
+  console.log(`Agent Mailbox CLI
 
 Required env:
   LOCAL_AI_COMMS_AGENT_ID=<agent-id>

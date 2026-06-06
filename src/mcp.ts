@@ -8,18 +8,20 @@ import { createCommunicationTools } from "./tools";
 export function createLocalCommsMcpServer(store: LocalCommsStore, agent: AgentConfig): McpServer {
   const server = new McpServer(
     {
-      name: "beeai-local-comms",
+      name: "agent-mailbox",
       version: "0.1.0",
     },
     {
       instructions:
         [
-          "Use these tools to coordinate with local AI agents through a shared SQLite mailbox.",
-          "At the start of each work session, call session_start before editing or claiming work; it refreshes presence and returns unread messages, tasks, locks, pinned notes, and stale claims.",
+          "Use Agent Mailbox tools to coordinate with local AI agents through a shared SQLite mailbox.",
+          "At the start of each work session, call session_start before reading code, editing files, or claiming work; it refreshes presence and returns unread messages, tasks, advisory locks, pinned notes, and stale claims.",
           "This server is pull-based: agents only see changes when they call inbox, watch_updates, session_start, list_tasks, or related tools.",
-          "Before editing a shared file or module, call acquire_lock for that resource; release_lock when finished and renew with heartbeat or acquire_lock during long edits.",
+          "Before editing a shared file or module, call acquire_lock for that resource; these locks are cooperative advisory leases, not filesystem locks, so respect active locks owned by other agents.",
+          "Release locks with release_lock when finished and renew long work with heartbeat or acquire_lock.",
           "When handing off work, attach artifacts for the relevant files, URLs, diffs, screenshots, logs, or commands.",
-          "When finishing, blocking, or cancelling a task, call update_task with a specific note; the task creator is notified automatically.",
+          "When finishing, blocking, or cancelling a task, call update_task with a specific note; creator notifications for done, blocked, and cancelled are sent automatically.",
+          "Treat stale claimed tasks as reclaim candidates only after checking recent presence and message context.",
           "Use a distinct workspace per repository or project so unrelated agents do not share task, note, message, and lock state.",
         ].join(" "),
     },

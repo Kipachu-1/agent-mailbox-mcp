@@ -17,8 +17,8 @@ const artifactSchema = z.object({
 });
 
 const coordinationConventions = [
-  "Start each session with session_start so unread handoffs, pinned conventions, open tasks, stale claims, and active locks are visible before work begins.",
-  "Acquire a lock for each file, module, task, or other resource before editing it; renew long edits and release locks when finished.",
+  "Start each session with session_start before reading code, editing files, or claiming work so unread handoffs, pinned conventions, open tasks, stale claims, and active locks are visible.",
+  "Acquire a cooperative advisory lock for each file, module, task, or other resource before editing it; locks are coordination records, not filesystem locks.",
   "Attach file, URL, diff, screenshot, log, or command artifacts to tasks and messages whenever they would help another agent resume the work.",
   "When finishing a task, call update_task with a useful note; done, blocked, and cancelled updates notify the task creator automatically.",
   "Use a distinct workspace per repository or project so unrelated task lists, locks, notes, and channels stay separate.",
@@ -37,7 +37,7 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
     new DynamicTool({
       name: "session_start",
       description:
-        "Start-of-session coordination check. Call this before project work to refresh presence and see unread messages, open tasks, stale claimed tasks, active locks, pinned notes, online agents, and recommended next steps.",
+        "First tool to call at the start of a work session. It refreshes presence and returns unread messages, open tasks, stale claimed tasks, active advisory locks, pinned notes, online agents, and recommended next steps before code reading, editing, or task claiming begins.",
       inputSchema: z.object({
         name: z.string().min(1).optional(),
         workspace: workspaceSchema,
@@ -387,7 +387,7 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
     new DynamicTool({
       name: "list_tasks",
       description:
-        "List visible tasks by status, assignee, creator, channel, parent, recency, or stale claim age. Use stale_after_seconds to find claimed tasks that may need a heartbeat check or reassignment.",
+        "List visible tasks by status, assignee, creator, channel, parent, recency, or stale claim age. Use stale_after_seconds to find claimed tasks, then check recent presence and message context before reclaiming or reassigning.",
       inputSchema: z.object({
         workspace: workspaceSchema,
         status: taskStatusSchema.optional(),
@@ -429,7 +429,7 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
     new DynamicTool({
       name: "update_task",
       description:
-        "Change a task status, update workflow fields, and append an audit note. Done, blocked, and cancelled updates from another agent automatically notify the task creator.",
+        "Change a task status, update workflow fields, and append an audit note. Done, blocked, and cancelled updates from another agent automatically notify the task creator, so include a concrete completion or blocking note.",
       inputSchema: z.object({
         workspace: workspaceSchema,
         task_id: z.string().min(1),
@@ -547,7 +547,7 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
     new DynamicTool({
       name: "acquire_lock",
       description:
-        "Acquire or renew a cooperative workspace-scoped lease for a file, module, task, or other resource before editing. If another agent owns an active lock, coordinate instead of overwriting.",
+        "Acquire or renew a cooperative advisory workspace-scoped lease for a file, module, task, or other resource before editing. This does not lock the filesystem; if another agent owns an active lock, coordinate instead of overwriting.",
       inputSchema: z.object({
         workspace: workspaceSchema,
         resource: z.string().min(1),

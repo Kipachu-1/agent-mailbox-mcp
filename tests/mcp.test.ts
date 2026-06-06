@@ -6,9 +6,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 test(
-  "stdio MCP server exposes BeeAI-backed communication tools",
+  "stdio MCP server exposes Agent Mailbox communication tools",
   async () => {
-    const dir = mkdtempSync(join(tmpdir(), "local-ai-comms-mcp-"));
+    const dir = mkdtempSync(join(tmpdir(), "agent-mailbox-mcp-"));
     const client = new Client({ name: "local-comms-smoke", version: "0.0.0" });
     const transport = new StdioClientTransport({
       command: "bun",

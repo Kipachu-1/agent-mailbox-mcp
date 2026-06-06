@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "mcp",
+      "name": "agent-mailbox-mcp",
       "dependencies": {
         "@modelcontextprotocol/sdk": "^1.29.0",
         "beeai-framework": "^0.1.29",

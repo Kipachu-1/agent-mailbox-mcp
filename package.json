@@ -1,5 +1,5 @@
 {
-  "name": "mcp",
+  "name": "agent-mailbox-mcp",
   "module": "index.ts",
   "type": "module",
   "private": true,

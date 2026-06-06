@@ -311,7 +311,7 @@ test("claim_task respects workspace scope when provided", () => {
 });
 
 function tempDb(): { dir: string; path: string } {
-  const dir = mkdtempSync(join(tmpdir(), "local-ai-comms-"));
+  const dir = mkdtempSync(join(tmpdir(), "agent-mailbox-"));
   tempDirs.push(dir);
   return { dir, path: join(dir, "mailbox.sqlite") };
 }

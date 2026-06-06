@@ -1,8 +1,8 @@
-# BeeAI Local Comms MCP
+# Agent Mailbox MCP
 
 Coordinate local AI coding agents without a cloud service.
 
-BeeAI Local Comms MCP is a small, local-first MCP server for teams that run Codex, Claude Code, Cursor, or other AI tools against the same repo. Each agent gets its own identity, but everyone shares one SQLite mailbox for messages, tasks, notes, artifacts, and cooperative file locks.
+Agent Mailbox MCP is a small, local-first MCP server for teams that run Codex, Claude Code, Cursor, or other AI tools against the same repo. Each agent gets its own identity, but everyone shares one SQLite mailbox for messages, tasks, notes, artifacts, and cooperative advisory locks.
 
 It is built for the practical problems that show up when multiple agents work nearby:
 
@@ -21,7 +21,7 @@ The server is intentionally simple: stdio MCP, Bun, BeeAI Framework tools, and S
 - **Direct and channel messaging** with threads, read state, metadata, and structured artifacts.
 - **Claimable tasks** with priorities, due dates, dependencies, blocked reasons, audit events, and file/URL/log/diff attachments.
 - **Automatic task notifications**: when another agent marks your task `done`, `blocked`, or `cancelled`, you get a direct inbox message.
-- **Cooperative locks** for files, modules, tasks, or any shared resource.
+- **Cooperative advisory locks** for files, modules, tasks, or any shared resource. They guide agents; they do not lock files at the operating-system level.
 - **Pinned shared notes** for durable conventions and project context.
 - **Workspace scoping** so each repo or project can keep its own clean coordination state.
 - **Pull-based watching** through `watch_updates` for near-live polling while a client is active.
@@ -51,7 +51,7 @@ Most of the time you do not run it manually. Configure your MCP client and let t
 | `LOCAL_AI_COMMS_DB` | No | Shared SQLite path. Defaults to `$HOME/.local/share/local-ai-comms.sqlite`. |
 | `LOCAL_AI_COMMS_WORKSPACE` | No | Project scope. Defaults to `default`. Use one workspace per repo. |
 
-Use the same database path for every local tool, but give each tool a different agent id.
+Use the same database path for every local tool, but give each tool a different agent id. The `LOCAL_AI_COMMS_*` variables and `local-ai-comms.sqlite` default path are retained for compatibility with existing installations.
 
 ## MCP Client Config
 
@@ -60,7 +60,7 @@ Claude Code example:
 ```json
 {
   "mcpServers": {
-    "beeai-local-comms": {
+    "agent-mailbox": {
       "command": "bun",
       "args": ["run", "/Users/arsenkipachu/Desktop/mcp/index.ts"],
       "env": {
@@ -79,7 +79,7 @@ Codex example:
 ```json
 {
   "mcpServers": {
-    "beeai-local-comms": {
+    "agent-mailbox": {
       "command": "bun",
       "args": ["run", "/Users/arsenkipachu/Desktop/mcp/index.ts"],
       "env": {
@@ -101,19 +101,19 @@ Use this as the shared convention for every agent in a workspace:
 2. Read unread messages and call `read_message` after each handled item.
 3. Review pinned notes before changing behavior or ownership assumptions.
 4. Claim only tasks you intend to start now.
-5. Check `active_locks`, then call `acquire_lock` before editing shared files or modules.
+5. Check `active_locks`, then call `acquire_lock` before editing shared files or modules. Locks are advisory coordination records, not filesystem locks.
 6. Attach artifacts to tasks and handoff messages whenever files, URLs, diffs, screenshots, logs, or commands matter.
 7. Call `heartbeat` during long work.
 8. Finish with `update_task` and a specific note. Creator notifications are sent automatically for `done`, `blocked`, and `cancelled`.
 9. Release every lock you own.
 
-Stale claimed tasks are cooperative, not magical. If `session_start` or `list_tasks` with `stale_after_seconds` shows a stale claim, check `who_is_online` and recent messages before reclaiming or asking the user.
+Stale claimed tasks are cooperative, not magical. If `session_start` or `list_tasks` with `stale_after_seconds` shows a stale claim, check `who_is_online` and recent message context before reclaiming or asking the user.
 
 ## Tools
 
 ### Orientation
 
-- `session_start`: start-of-session digest with unread messages, open tasks, stale claimed tasks, active locks, pinned notes, online agents, conventions, and next steps.
+- `session_start`: first call at the start of each work session; returns unread messages, open tasks, stale claimed tasks, active locks, pinned notes, online agents, conventions, and next steps.
 - `register_agent`: register or refresh the current agent identity. Prefer `session_start` at session start.
 - `heartbeat`: refresh presence during long work.
 - `agent_status`: read this agent's registered status.
@@ -136,7 +136,7 @@ Stale claimed tasks are cooperative, not magical. If `session_start` or `list_ta
 - `create_task`: create a claimable handoff task. Clear criteria and artifacts make handoffs much easier.
 - `list_tasks`: list visible tasks. Use `stale_after_seconds` to find claimed tasks that have not changed recently.
 - `claim_task`: atomically claim an open task in the current workspace.
-- `update_task`: update status and workflow fields. `done`, `blocked`, and `cancelled` updates notify the creator automatically when another agent made the update.
+- `update_task`: update status and workflow fields. `done`, `blocked`, and `cancelled` updates from another agent automatically notify the creator.
 
 ### Notes, Artifacts, and Locks
 
@@ -145,7 +145,7 @@ Stale claimed tasks are cooperative, not magical. If `session_start` or `list_ta
 - `pin_note`: pin or unpin a note.
 - `summarize_channel`: return a compact channel digest.
 - `list_artifacts`: list references attached to a message, task, or note.
-- `acquire_lock`: acquire or renew a cooperative lease for a resource before editing.
+- `acquire_lock`: acquire or renew a cooperative advisory lease for a resource before editing. This does not prevent file writes by the OS, Git, editors, or shell commands.
 - `release_lock`: release a lock you own.
 - `list_locks`: list active or expired locks.
 
@@ -245,11 +245,13 @@ Read-only resources are exposed for quick context:
 - `local-comms://notes/pinned`
 - `local-comms://channels/{channel}`
 
+These `local-comms://` resource URIs are intentionally kept stable for existing MCP clients.
+
 ## Limits
 
 This is a local polling mailbox, not a push notification daemon. `watch_updates` can hold a tool call open for bounded near-live behavior, but it cannot wake a sleeping agent.
 
-Locks are cooperative. They work when agents call `acquire_lock` before editing and `release_lock` after finishing.
+Locks are cooperative advisory records in SQLite, not filesystem locks. They work when agents call `acquire_lock` before editing, respect locks owned by others, and call `release_lock` after finishing.
 
 Presence is heartbeat-based. An agent that crashes may look claimed or recently online until its timestamps age out, which is why stale claimed task checks are exposed explicitly.
 
@@ -271,6 +273,6 @@ SQLite uses WAL mode and `busy_timeout` so multiple local MCP processes can shar
 
 ## Contributing
 
-Issues, experiments, and small PRs are welcome if you are using local AI agents against the same repo and hit a coordination gap. Good contributions keep the server local-first, dependency-light, and easy for MCP clients to understand from tool names, descriptions, and structured outputs.
+Issues, experiments, and small PRs are welcome if you are using local AI agents against the same repo and hit a coordination gap. Good contributions keep Agent Mailbox local-first, dependency-light, and easy for MCP clients to understand from tool names, descriptions, and structured outputs.
 
 If you publish a fork publicly, add a `LICENSE` file so downstream users know how they can use it.
