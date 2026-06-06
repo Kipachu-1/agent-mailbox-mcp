@@ -13,10 +13,6 @@
     "allowImportingTsExtensions": true,
     "verbatimModuleSyntax": true,
     "noEmit": true,
-    "baseUrl": ".",
-    "paths": {
-      "@/*": ["ui/src/*"]
-    },
 
     // Best practices
     "strict": true,

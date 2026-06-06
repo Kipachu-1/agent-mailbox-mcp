@@ -38,7 +38,6 @@ export function startAgentMailboxHttpServer(
 
   const sessions = new Map<string, HttpSession>();
   const healthPath = "/health";
-  const publicRoot = new URL("../public/", import.meta.url);
 
   const bunServer = Bun.serve({
     hostname: config.host,
@@ -75,7 +74,7 @@ export function startAgentMailboxHttpServer(
         return jsonResponse(405, { error: "Method not allowed" }, { Allow: "GET, POST, DELETE" });
       }
 
-      return serveDashboardAsset(url, publicRoot);
+      return jsonResponse(404, { error: "Not found" });
     },
   });
 
@@ -92,8 +91,8 @@ export function startAgentMailboxHttpServer(
       return jsonResponse(401, { error: "Unauthorized" });
     }
 
-    if (request.method === "GET" && url.pathname === "/api/dashboard") {
-      return jsonResponse(200, dashboardPayload());
+    if (request.method === "GET" && url.pathname === "/api/overview") {
+      return jsonResponse(200, overviewPayload());
     }
 
     if (request.method === "GET" && url.pathname === "/api/access-keys") {
@@ -130,7 +129,7 @@ export function startAgentMailboxHttpServer(
     return jsonResponse(404, { error: "Not found" });
   }
 
-  function dashboardPayload() {
+  function overviewPayload() {
     const keys = store.listAccessKeys();
     const agents = store.listAgents();
     const onlineAgents = store.whoIsOnline(undefined, 300);
@@ -253,31 +252,6 @@ export function startAgentMailboxHttpServer(
     server: bunServer,
     url: `http://${config.host}:${bunServer.port ?? config.port}${config.path}`,
   };
-}
-
-async function serveDashboardAsset(url: URL, publicRoot: URL): Promise<Response> {
-  const relativePath = decodeURIComponent(url.pathname === "/" ? "index.html" : url.pathname.slice(1));
-  if (relativePath.includes("..")) {
-    return jsonResponse(400, { error: "Bad path" });
-  }
-
-  const file = Bun.file(new URL(relativePath, publicRoot));
-  if (await file.exists()) {
-    return new Response(file);
-  }
-
-  const index = Bun.file(new URL("index.html", publicRoot));
-  if (await index.exists()) {
-    return new Response(index, {
-      headers: {
-        "Content-Type": "text/html; charset=utf-8",
-      },
-    });
-  }
-
-  return jsonResponse(404, {
-    error: "Dashboard build not found. Run 'bun run build' first.",
-  });
 }
 
 function bearerToken(request: Request): string | undefined {

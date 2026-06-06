@@ -39,8 +39,8 @@ test(
       status: "ok",
     });
 
-    const deniedDashboard = await fetch(`http://${server.host}:${server.port}/api/dashboard`);
-    expect(deniedDashboard.status).toBe(401);
+    const deniedOverview = await fetch(`http://${server.host}:${server.port}/api/overview`);
+    expect(deniedOverview.status).toBe(401);
 
     const agentAKey = await createAccessKey(server, {
       name: "Agent A token",
@@ -55,8 +55,8 @@ test(
       workspace: "fullstack",
     });
 
-    const dashboard = await adminJson<{ summary: Record<string, number> }>(server, "/api/dashboard");
-    expect(dashboard.summary.enabled_keys).toBe(2);
+    const overview = await adminJson<{ summary: Record<string, number> }>(server, "/api/overview");
+    expect(overview.summary.enabled_keys).toBe(2);
 
     const agentA = createHttpClient(server.url, agentAKey.token, "agent-a-client");
     const agentB = createHttpClient(server.url, agentBKey.token, "agent-b-client");
