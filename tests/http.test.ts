@@ -81,6 +81,11 @@ test(
         },
       });
       expect(message.isError).not.toBe(true);
+      const sentMessage = (
+        message.structuredContent as {
+          message: { id: string; thread_id: string };
+        }
+      ).message;
 
       const task = await agentA.client.callTool({
         name: "create_task",
@@ -91,6 +96,29 @@ test(
         },
       });
       expect(task.isError).not.toBe(true);
+      const createdTask = (
+        task.structuredContent as {
+          task: { id: string };
+        }
+      ).task;
+
+      const agentBSession = await agentB.client.callTool({
+        name: "session_start",
+        arguments: {},
+      });
+      const sessionContent = agentBSession.structuredContent as {
+        session_summary: { unread_messages: number; open_tasks: number };
+        next_actions: { priority: number; tool: string; related_ids: string[] }[];
+        unread_messages: { id: string }[];
+        open_tasks: { id: string }[];
+      };
+      expect(sessionContent.session_summary.unread_messages).toBe(1);
+      expect(sessionContent.session_summary.open_tasks).toBe(1);
+      expect(sessionContent.next_actions[0]?.priority).toBe(1);
+      expect(sessionContent.next_actions[0]?.tool).toBe("inbox");
+      expect(sessionContent.next_actions.map((action) => action.tool)).toContain("claim_task");
+      expect(sessionContent.unread_messages.map((item) => item.id)).toContain(sentMessage.id);
+      expect(sessionContent.open_tasks.map((item) => item.id)).toContain(createdTask.id);
 
       const inbox = await agentB.client.callTool({
         name: "inbox",
@@ -108,6 +136,193 @@ test(
         },
       });
       expect(JSON.stringify(tasks.structuredContent)).toContain("Review API contract");
+
+      const artifacts = await agentB.client.callTool({
+        name: "list_artifacts",
+        arguments: {
+          owner_type: "message",
+          owner_id: sentMessage.id,
+        },
+      });
+      expect(JSON.stringify(artifacts.structuredContent)).toContain("/tmp/frontend/app.ts");
+
+      const search = await agentB.client.callTool({
+        name: "search_messages",
+        arguments: {
+          query: "streamable",
+        },
+      });
+      expect(JSON.stringify(search.structuredContent)).toContain("hello over streamable http");
+
+      const read = await agentB.client.callTool({
+        name: "read_message",
+        arguments: {
+          message_id: sentMessage.id,
+        },
+      });
+      expect(JSON.stringify(read.structuredContent)).toContain('"unread":false');
+
+      const reply = await agentB.client.callTool({
+        name: "reply_message",
+        arguments: {
+          message_id: sentMessage.id,
+          body: "acknowledged",
+        },
+      });
+      expect(reply.isError).not.toBe(true);
+
+      const threads = await agentB.client.callTool({
+        name: "list_threads",
+        arguments: {},
+      });
+      expect(JSON.stringify(threads.structuredContent)).toContain(sentMessage.thread_id);
+
+      const thread = await agentB.client.callTool({
+        name: "get_thread",
+        arguments: {
+          thread_id: sentMessage.thread_id,
+        },
+      });
+      expect(JSON.stringify(thread.structuredContent)).toContain("acknowledged");
+
+      const note = await agentB.client.callTool({
+        name: "write_note",
+        arguments: {
+          title: "API context",
+          body: "Keep contract changes coordinated.",
+          pinned: true,
+        },
+      });
+      expect(note.isError).not.toBe(true);
+      const writtenNote = (
+        note.structuredContent as {
+          note: { id: string };
+        }
+      ).note;
+
+      const notes = await agentA.client.callTool({
+        name: "read_notes",
+        arguments: {
+          pinned_only: true,
+        },
+      });
+      expect(JSON.stringify(notes.structuredContent)).toContain("API context");
+
+      const unpinned = await agentB.client.callTool({
+        name: "pin_note",
+        arguments: {
+          note_id: writtenNote.id,
+          pinned: false,
+        },
+      });
+      expect(JSON.stringify(unpinned.structuredContent)).toContain('"pinned":false');
+
+      const summary = await agentA.client.callTool({
+        name: "summarize_channel",
+        arguments: {},
+      });
+      expect(JSON.stringify(summary.structuredContent)).toContain("task_count");
+
+      const claimed = await agentB.client.callTool({
+        name: "claim_task",
+        arguments: {
+          task_id: createdTask.id,
+          note: "Working on it.",
+        },
+      });
+      expect(JSON.stringify(claimed.structuredContent)).toContain('"status":"claimed"');
+
+      const updated = await agentB.client.callTool({
+        name: "update_task",
+        arguments: {
+          task_id: createdTask.id,
+          status: "done",
+          note: "Looks good.",
+          artifacts: [{ type: "log", path: "/tmp/review.log", label: "review log" }],
+        },
+      });
+      expect(JSON.stringify(updated.structuredContent)).toContain("status_changed");
+      expect(JSON.stringify(updated.structuredContent)).toContain("/tmp/review.log");
+
+      const lock = await agentA.client.callTool({
+        name: "acquire_lock",
+        arguments: {
+          resource: "src/http.ts",
+          purpose: "review",
+        },
+      });
+      expect(JSON.stringify(lock.structuredContent)).toContain("src/http.ts");
+
+      const locks = await agentA.client.callTool({
+        name: "list_locks",
+        arguments: {
+          resource: "src/http.ts",
+        },
+      });
+      expect(JSON.stringify(locks.structuredContent)).toContain("review");
+
+      const released = await agentA.client.callTool({
+        name: "release_lock",
+        arguments: {
+          resource: "src/http.ts",
+        },
+      });
+      expect(JSON.stringify(released.structuredContent)).toContain("src/http.ts");
+
+      const handoff = await agentA.client.callTool({
+        name: "create_handoff",
+        arguments: {
+          title: "Polish agent handoff copy",
+          description: "Tighten wording and report the changed file.",
+          assignee_id: "agent-b",
+          notification_body: "Please pick up the handoff copy task.",
+          artifacts: [{ type: "file", path: "/tmp/copy.md", label: "copy" }],
+        },
+      });
+      expect(JSON.stringify(handoff.structuredContent)).toContain("notification_message");
+      expect(JSON.stringify(handoff.structuredContent)).toContain("/tmp/copy.md");
+      const handoffTask = (
+        handoff.structuredContent as {
+          task: { id: string };
+        }
+      ).task;
+
+      await agentB.client.callTool({
+        name: "acquire_lock",
+        arguments: {
+          resource: "docs/handoff.md",
+          purpose: "handoff cleanup",
+        },
+      });
+      const finished = await agentB.client.callTool({
+        name: "finish_work",
+        arguments: {
+          task_id: handoffTask.id,
+          note: "Copy is polished.",
+          artifacts: [{ type: "file", path: "/tmp/final-copy.md", label: "final copy" }],
+          release_locks: ["docs/handoff.md"],
+          handoff_body: "Finished the handoff copy cleanup.",
+        },
+      });
+      expect(JSON.stringify(finished.structuredContent)).toContain("/tmp/final-copy.md");
+      expect(JSON.stringify(finished.structuredContent)).toContain('"release_errors":[]');
+      expect(JSON.stringify(finished.structuredContent)).toContain("docs/handoff.md");
+
+      const updates = await agentA.client.callTool({
+        name: "watch_updates",
+        arguments: {
+          since: new Date(Date.now() - 1_000).toISOString(),
+        },
+      });
+      expect(JSON.stringify(updates.structuredContent)).toContain("updates");
+
+      const resources = await agentA.client.listResources();
+      expect(resources.resources.map((resource) => resource.uri)).toContain("local-comms://agents");
+
+      const openTasksResource = await agentA.client.readResource({
+        uri: "local-comms://tasks/open",
+      });
+      expect(JSON.stringify(openTasksResource.contents)).toContain("local-comms://tasks/open");
     } finally {
       if (agentA.transport.sessionId) {
         await agentA.transport.terminateSession();

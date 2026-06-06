@@ -1,6 +1,12 @@
 import { DynamicTool, JSONToolOutput, type AnyTool } from "beeai-framework/tools/base";
 import { z } from "zod";
 import type { AgentConfig } from "./config";
+import {
+  buildNextActions,
+  buildSessionSummary,
+  coordinationConventions,
+  recommendedSessionSteps,
+} from "./session";
 import { LocalCommsStore, type TaskStatus } from "./store";
 
 const metadataSchema = z.record(z.string(), z.unknown()).optional();
@@ -16,25 +22,23 @@ const artifactSchema = z.object({
   metadata: metadataSchema,
 });
 
-const coordinationConventions = [
-  "Start each session with session_start before reading code, editing files, or claiming work so unread handoffs, pinned conventions, open tasks, stale claims, and active locks are visible.",
-  "Acquire a cooperative advisory lock for each file, module, task, or other resource before editing it; locks are coordination records, not filesystem locks.",
-  "Attach file, URL, diff, screenshot, log, or command artifacts to tasks and messages whenever they would help another agent resume the work.",
-  "When finishing a task, call update_task with a useful note; done, blocked, and cancelled updates notify the task creator automatically.",
-  "Use a distinct workspace per repository or project so unrelated task lists, locks, notes, and channels stay separate.",
-];
-
-const recommendedSessionSteps = [
-  "Read unread_messages and call read_message after each message is handled.",
-  "Review pinned_notes for workspace conventions before changing behavior.",
-  "Claim only open tasks you intend to work on now; treat stale_claimed_tasks as reclaim candidates after checking recent agent presence.",
-  "Check active_locks before editing and acquire your own locks for touched resources.",
-  "Use heartbeat during long work so other agents can distinguish active work from stale presence.",
-];
+function communicationTool<Schema extends z.ZodTypeAny, Output>(fields: {
+  name: string;
+  description: string;
+  inputSchema: Schema;
+  handler: (input: z.output<Schema>) => Promise<JSONToolOutput<Output>>;
+}): AnyTool {
+  return new DynamicTool<JSONToolOutput<Output>, Schema>({
+    name: fields.name,
+    description: fields.description,
+    inputSchema: fields.inputSchema,
+    handler: (input) => fields.handler(input),
+  });
+}
 
 export function createCommunicationTools(store: LocalCommsStore, agent: AgentConfig): AnyTool[] {
   return [
-    new DynamicTool({
+    communicationTool({
       name: "session_start",
       description:
         "First tool to call at the start of a work session. It refreshes presence and returns unread messages, open tasks, stale claimed tasks, active advisory locks, pinned notes, online agents, and recommended next steps before code reading, editing, or task claiming begins.",
@@ -49,8 +53,9 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
         active_within_seconds: z.number().int().min(1).max(86_400).optional(),
         limit: z.number().int().min(1).max(200).optional(),
       }),
-      handler: async (input: any) => {
+      handler: async (input) => {
         const workspace = input.workspace ?? agent.workspace;
+        const normalizedWorkspace = workspaceName(workspace);
         const channel = input.channel;
         const limit = input.limit;
         const currentAgent = store.registerAgent({
@@ -61,54 +66,77 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
           currentTaskId: input.current_task_id,
           metadata: input.metadata,
         });
+        const unreadMessages = store.inbox(agent.id, {
+          workspace,
+          channel,
+          unreadOnly: true,
+          includeSent: false,
+          limit,
+        });
+        const openTasks = store.listTasks(agent.id, {
+          workspace,
+          channel,
+          status: "open",
+          limit,
+        });
+        const claimedTasks = store.listTasks(agent.id, {
+          workspace,
+          channel,
+          status: "claimed",
+          assigneeId: agent.id,
+          limit,
+        });
+        const staleClaimedTasks = store.listTasks(agent.id, {
+          workspace,
+          channel,
+          staleAfterSeconds: input.stale_after_seconds ?? 3_600,
+          limit,
+        });
+        const activeLocks = store.listLocks({ workspace });
+        const pinnedNotes = store.readNotes({
+          workspace,
+          channel,
+          pinnedOnly: true,
+          limit,
+        });
+        const onlineAgents = store.whoIsOnline(
+          workspace,
+          input.active_within_seconds,
+        );
+        const collections = {
+          unreadMessages,
+          openTasks,
+          claimedTasks,
+          staleClaimedTasks,
+          activeLocks,
+          pinnedNotes,
+          onlineAgents,
+        };
 
         return json({
           agent: currentAgent,
-          workspace: workspaceName(workspace),
+          workspace: normalizedWorkspace,
           checked_at: new Date().toISOString(),
-          unread_messages: store.inbox(agent.id, {
-            workspace,
+          session_summary: buildSessionSummary(collections),
+          next_actions: buildNextActions({
+            agentId: agent.id,
+            workspace: normalizedWorkspace,
             channel,
-            unreadOnly: true,
-            includeSent: false,
-            limit,
+            collections,
           }),
-          open_tasks: store.listTasks(agent.id, {
-            workspace,
-            channel,
-            status: "open",
-            limit,
-          }),
-          claimed_tasks: store.listTasks(agent.id, {
-            workspace,
-            channel,
-            status: "claimed",
-            assigneeId: agent.id,
-            limit,
-          }),
-          stale_claimed_tasks: store.listTasks(agent.id, {
-            workspace,
-            channel,
-            staleAfterSeconds: input.stale_after_seconds ?? 3_600,
-            limit,
-          }),
-          active_locks: store.listLocks({ workspace }),
-          pinned_notes: store.readNotes({
-            workspace,
-            channel,
-            pinnedOnly: true,
-            limit,
-          }),
-          online_agents: store.whoIsOnline(
-            workspace,
-            input.active_within_seconds,
-          ),
+          unread_messages: unreadMessages,
+          open_tasks: openTasks,
+          claimed_tasks: claimedTasks,
+          stale_claimed_tasks: staleClaimedTasks,
+          active_locks: activeLocks,
+          pinned_notes: pinnedNotes,
+          online_agents: onlineAgents,
           conventions: coordinationConventions,
           recommended_next_steps: recommendedSessionSteps,
         });
       },
     }),
-    new DynamicTool({
+    communicationTool({
       name: "register_agent",
       description:
         "Register or refresh the current local AI agent identity. Prefer session_start at the beginning of a work session because it also returns inbox, task, lock, and convention context.",
@@ -119,7 +147,7 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
         current_task_id: z.string().min(1).optional(),
         metadata: metadataSchema,
       }),
-      handler: async (input: any) =>
+      handler: async (input) =>
         json({
           agent: store.registerAgent({
             id: agent.id,
@@ -131,7 +159,7 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
           }),
         }),
     }),
-    new DynamicTool({
+    communicationTool({
       name: "heartbeat",
       description:
         "Update current agent presence, status, current task, and last-seen timestamp during long work so claimed tasks do not look abandoned.",
@@ -141,7 +169,7 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
         workspace: workspaceSchema,
         metadata: metadataSchema,
       }),
-      handler: async (input: any) =>
+      handler: async (input) =>
         json({
           agent: store.heartbeat({
             id: agent.id,
@@ -153,22 +181,22 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
           }),
         }),
     }),
-    new DynamicTool({
+    communicationTool({
       name: "agent_status",
       description: "Get the current registered status for this local agent.",
       inputSchema: z.object({}),
-      handler: async () => json({ agent: store.getAgent(agent.id) }),
+      handler: async () => json({ agent: store.getAgent(agent.id, workspaceName(agent.workspace)) }),
     }),
-    new DynamicTool({
+    communicationTool({
       name: "list_agents",
       description:
         "List known local AI agents that have registered with this mailbox, optionally scoped to one workspace.",
       inputSchema: z.object({
         workspace: workspaceSchema,
       }),
-      handler: async (input: any) => json({ agents: store.listAgents(input.workspace) }),
+      handler: async (input) => json({ agents: store.listAgents(input.workspace) }),
     }),
-    new DynamicTool({
+    communicationTool({
       name: "who_is_online",
       description:
         "List agents with a recent heartbeat in the current or requested workspace. Use this before reclaiming stale claimed tasks.",
@@ -176,7 +204,7 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
         workspace: workspaceSchema,
         active_within_seconds: z.number().int().min(1).max(86_400).optional(),
       }),
-      handler: async (input: any) =>
+      handler: async (input) =>
         json({
           agents: store.whoIsOnline(
             input.workspace ?? agent.workspace,
@@ -184,7 +212,7 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
           ),
         }),
     }),
-    new DynamicTool({
+    communicationTool({
       name: "send_message",
       description:
         "Send a direct message to one agent or post a message to a local channel. Include artifacts for files, URLs, diffs, screenshots, logs, or commands that another agent should inspect.",
@@ -198,7 +226,7 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
         metadata: metadataSchema,
         artifacts: z.array(artifactSchema).optional(),
       }),
-      handler: async (input: any) =>
+      handler: async (input) =>
         json({
           message: store.sendMessage({
             senderId: agent.id,
@@ -213,7 +241,7 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
           }),
         }),
     }),
-    new DynamicTool({
+    communicationTool({
       name: "reply_message",
       description:
         "Reply to a visible direct or channel message while preserving its thread. Use this for handoff acknowledgements and completion notes tied to a message.",
@@ -224,7 +252,7 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
         metadata: metadataSchema,
         artifacts: z.array(artifactSchema).optional(),
       }),
-      handler: async (input: any) =>
+      handler: async (input) =>
         json({
           message: store.replyMessage({
             senderId: agent.id,
@@ -236,7 +264,7 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
           }),
         }),
     }),
-    new DynamicTool({
+    communicationTool({
       name: "inbox",
       description:
         "List unread or recent direct and channel messages visible to the current agent. Use unread_only for triage, then read_message after handling each item.",
@@ -248,7 +276,7 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
         thread_id: z.string().min(1).optional(),
         limit: z.number().int().min(1).max(200).optional(),
       }),
-      handler: async (input: any) =>
+      handler: async (input) =>
         json({
           messages: store.inbox(agent.id, {
             workspace: input.workspace ?? agent.workspace,
@@ -260,7 +288,7 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
           }),
         }),
     }),
-    new DynamicTool({
+    communicationTool({
       name: "read_message",
       description:
         "Fetch one visible message and mark it read for the current agent. Mark messages read only after the handoff or request has been handled or converted into a task.",
@@ -268,12 +296,12 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
         workspace: workspaceSchema,
         message_id: z.string().min(1),
       }),
-      handler: async (input: any) =>
+      handler: async (input) =>
         json({
           message: store.readMessage(agent.id, input.message_id, input.workspace ?? agent.workspace),
         }),
     }),
-    new DynamicTool({
+    communicationTool({
       name: "search_messages",
       description:
         "Search visible direct and channel message bodies when recovering old decisions, handoffs, or context.",
@@ -283,7 +311,7 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
         channel: z.string().min(1).optional(),
         limit: z.number().int().min(1).max(200).optional(),
       }),
-      handler: async (input: any) =>
+      handler: async (input) =>
         json({
           messages: store.searchMessages(agent.id, {
             workspace: input.workspace ?? agent.workspace,
@@ -293,7 +321,7 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
           }),
         }),
     }),
-    new DynamicTool({
+    communicationTool({
       name: "list_threads",
       description:
         "List visible message threads in the current or requested workspace, ordered by recent activity.",
@@ -301,12 +329,12 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
         workspace: workspaceSchema,
         limit: z.number().int().min(1).max(200).optional(),
       }),
-      handler: async (input: any) =>
+      handler: async (input) =>
         json({
           threads: store.listThreads(agent.id, input.workspace ?? agent.workspace, input.limit),
         }),
     }),
-    new DynamicTool({
+    communicationTool({
       name: "get_thread",
       description:
         "Return visible messages for one thread in chronological order so an agent can reconstruct a handoff conversation before acting.",
@@ -315,7 +343,7 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
         thread_id: z.string().min(1),
         limit: z.number().int().min(1).max(200).optional(),
       }),
-      handler: async (input: any) =>
+      handler: async (input) =>
         json({
           messages: store.getThread(
             agent.id,
@@ -325,7 +353,7 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
           ),
         }),
     }),
-    new DynamicTool({
+    communicationTool({
       name: "watch_updates",
       description:
         "Poll for new messages, tasks, task events, notes, or locks since a timestamp. This is pull-based long polling; it does not wake sleeping agents by itself.",
@@ -335,7 +363,7 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
         timeout_ms: z.number().int().min(0).max(60_000).optional(),
         interval_ms: z.number().int().min(100).max(5_000).optional(),
       }),
-      handler: async (input: any) => {
+      handler: async (input) => {
         const timeoutMs = input.timeout_ms ?? 0;
         const intervalMs = input.interval_ms ?? 500;
         const deadline = Date.now() + timeoutMs;
@@ -347,7 +375,7 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
         return json({ updates });
       },
     }),
-    new DynamicTool({
+    communicationTool({
       name: "create_task",
       description:
         "Create a claimable handoff task for local AI coordination. Provide clear acceptance criteria and attach relevant artifacts so another agent can resume without guessing.",
@@ -365,7 +393,7 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
         metadata: metadataSchema,
         artifacts: z.array(artifactSchema).optional(),
       }),
-      handler: async (input: any) =>
+      handler: async (input) =>
         json({
           task: store.createTask({
             creatorId: agent.id,
@@ -384,7 +412,88 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
           }),
         }),
     }),
-    new DynamicTool({
+    communicationTool({
+      name: "create_handoff",
+      description:
+        "Create a claimable task and, when requested, send a notification message in one workflow call. Use this for complete handoffs with acceptance criteria and artifacts.",
+      inputSchema: z.object({
+        workspace: workspaceSchema,
+        title: z.string().min(1),
+        description: z.string().optional(),
+        assignee_id: z.string().min(1).optional(),
+        channel: z.string().min(1).optional(),
+        priority: z.number().int().min(-100).max(100).optional(),
+        due_at: z.string().min(1).optional(),
+        parent_task_id: z.string().min(1).optional(),
+        blocked_reason: z.string().min(1).optional(),
+        dependencies: z.array(z.string().min(1)).optional(),
+        metadata: metadataSchema,
+        artifacts: z.array(artifactSchema).optional(),
+        notification_recipient_id: z.string().min(1).optional(),
+        notification_channel: z.string().min(1).optional(),
+        notification_body: z.string().min(1).optional(),
+        notification_metadata: metadataSchema,
+        notification_artifacts: z.array(artifactSchema).optional(),
+      }),
+      handler: async (input) => {
+        const notificationRequested = Boolean(
+          input.notification_recipient_id ||
+            input.notification_channel ||
+            input.notification_body,
+        );
+        const notificationRecipientId =
+          input.notification_recipient_id ??
+          (notificationRequested && !input.notification_channel ? input.assignee_id : undefined);
+        const notificationChannel =
+          input.notification_channel ??
+          (notificationRequested && !notificationRecipientId ? input.channel : undefined);
+        if (
+          notificationRequested &&
+          Boolean(notificationRecipientId) === Boolean(notificationChannel)
+        ) {
+          throw new Error(
+            "create_handoff notification requires exactly one destination: notification_recipient_id, notification_channel, assignee_id, or channel.",
+          );
+        }
+
+        const task = store.createTask({
+          creatorId: agent.id,
+          workspace: input.workspace ?? agent.workspace,
+          title: input.title,
+          description: input.description,
+          assigneeId: input.assignee_id,
+          channel: input.channel,
+          priority: input.priority,
+          dueAt: input.due_at,
+          parentTaskId: input.parent_task_id,
+          blockedReason: input.blocked_reason,
+          dependencies: input.dependencies,
+          metadata: input.metadata,
+          artifacts: input.artifacts,
+        });
+        const notificationMessage = notificationRequested
+          ? store.sendMessage({
+              senderId: agent.id,
+              workspace: input.workspace ?? agent.workspace,
+              recipientId: notificationRecipientId,
+              channel: notificationChannel,
+              body: input.notification_body ?? `Handoff created: ${task.title} (${task.id})`,
+              metadata: {
+                ...(input.notification_metadata ?? {}),
+                event_type: "handoff_created",
+                task_id: task.id,
+              },
+              artifacts: input.notification_artifacts ?? input.artifacts,
+            })
+          : null;
+
+        return json({
+          task,
+          notification_message: notificationMessage,
+        });
+      },
+    }),
+    communicationTool({
       name: "list_tasks",
       description:
         "List visible tasks by status, assignee, creator, channel, parent, recency, or stale claim age. Use stale_after_seconds to find claimed tasks, then check recent presence and message context before reclaiming or reassigning.",
@@ -398,7 +507,7 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
         stale_after_seconds: z.number().int().min(60).max(2_592_000).optional(),
         limit: z.number().int().min(1).max(200).optional(),
       }),
-      handler: async (input: any) =>
+      handler: async (input) =>
         json({
           tasks: store.listTasks(agent.id, {
             workspace: input.workspace ?? agent.workspace,
@@ -412,7 +521,7 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
           }),
         }),
     }),
-    new DynamicTool({
+    communicationTool({
       name: "claim_task",
       description:
         "Atomically claim an open task for the current agent. Claim only work you intend to start now, and follow with heartbeat during long-running work.",
@@ -421,12 +530,12 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
         task_id: z.string().min(1),
         note: z.string().optional(),
       }),
-      handler: async (input: any) =>
+      handler: async (input) =>
         json({
           task: store.claimTask(agent.id, input.task_id, input.note, input.workspace ?? agent.workspace),
         }),
     }),
-    new DynamicTool({
+    communicationTool({
       name: "update_task",
       description:
         "Change a task status, update workflow fields, and append an audit note. Done, blocked, and cancelled updates from another agent automatically notify the task creator, so include a concrete completion or blocking note.",
@@ -438,8 +547,9 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
         priority: z.number().int().min(-100).max(100).optional(),
         due_at: z.string().min(1).nullable().optional(),
         blocked_reason: z.string().min(1).nullable().optional(),
+        artifacts: z.array(artifactSchema).optional(),
       }),
-      handler: async (input: any) =>
+      handler: async (input) =>
         json({
           task: store.updateTask({
             agentId: agent.id,
@@ -450,11 +560,120 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
             priority: input.priority,
             dueAt: input.due_at,
             blockedReason: input.blocked_reason,
+            artifacts: input.artifacts,
           }),
-          events: store.listTaskEvents(input.task_id),
+          events: store.listVisibleTaskEvents(
+            agent.id,
+            input.task_id,
+            input.workspace ?? agent.workspace,
+          ),
         }),
     }),
-    new DynamicTool({
+    communicationTool({
+      name: "finish_work",
+      description:
+        "Finish or block a task, attach completion evidence, optionally send a handoff note, and release selected locks in one cleanup workflow.",
+      inputSchema: z.object({
+        workspace: workspaceSchema,
+        task_id: z.string().min(1),
+        status: taskStatusSchema.optional(),
+        note: z.string().optional(),
+        priority: z.number().int().min(-100).max(100).optional(),
+        due_at: z.string().min(1).nullable().optional(),
+        blocked_reason: z.string().min(1).nullable().optional(),
+        artifacts: z.array(artifactSchema).optional(),
+        release_locks: z.array(z.string().min(1)).optional(),
+        handoff_recipient_id: z.string().min(1).optional(),
+        handoff_channel: z.string().min(1).optional(),
+        handoff_body: z.string().min(1).optional(),
+        handoff_metadata: metadataSchema,
+        handoff_artifacts: z.array(artifactSchema).optional(),
+      }),
+      handler: async (input) => {
+        const handoffRequested = Boolean(
+          input.handoff_recipient_id ||
+            input.handoff_channel ||
+            input.handoff_body,
+        );
+        if (
+          input.handoff_recipient_id &&
+          input.handoff_channel
+        ) {
+          throw new Error(
+            "finish_work handoff requires at most one destination: handoff_recipient_id or handoff_channel.",
+          );
+        }
+
+        const status = input.status ?? "done";
+        const task = store.updateTask({
+          agentId: agent.id,
+          workspace: input.workspace ?? agent.workspace,
+          taskId: input.task_id,
+          status: status as TaskStatus,
+          note: input.note,
+          priority: input.priority,
+          dueAt: input.due_at,
+          blockedReason: input.blocked_reason,
+          artifacts: input.artifacts,
+        });
+        const events = store.listVisibleTaskEvents(
+          agent.id,
+          input.task_id,
+          input.workspace ?? agent.workspace,
+        );
+        const releasedLocks = [];
+        const releaseErrors = [];
+        for (const resource of input.release_locks ?? []) {
+          try {
+            releasedLocks.push(
+              store.releaseLock(agent.id, resource, input.workspace ?? agent.workspace),
+            );
+          } catch (error) {
+            releaseErrors.push({
+              resource,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+        }
+
+        const handoffRecipientId =
+          input.handoff_recipient_id ??
+          (!input.handoff_channel && task.creator_id !== agent.id ? task.creator_id : undefined);
+        const handoffChannel =
+          input.handoff_channel ??
+          (!handoffRecipientId ? task.channel ?? undefined : undefined);
+        const handoffMessage =
+          handoffRequested && (handoffRecipientId || handoffChannel)
+            ? store.sendMessage({
+                senderId: agent.id,
+                workspace: input.workspace ?? agent.workspace,
+                recipientId: handoffRecipientId,
+                channel: handoffChannel,
+                body: input.handoff_body ?? `Task ${status}: ${task.title} (${task.id})`,
+                metadata: {
+                  ...(input.handoff_metadata ?? {}),
+                  event_type: "finish_work_handoff",
+                  task_id: task.id,
+                  status,
+                },
+                artifacts: input.handoff_artifacts ?? input.artifacts,
+              })
+            : null;
+
+        return json({
+          task,
+          events,
+          released_locks: releasedLocks,
+          release_errors: releaseErrors,
+          handoff_message: handoffMessage,
+          handoff_skipped_reason:
+            handoffRequested && !handoffMessage
+              ? "No handoff destination was available."
+              : undefined,
+        });
+      },
+    }),
+    communicationTool({
       name: "write_note",
       description:
         "Write or update a shared scratchpad note in a workspace or channel. Pin durable conventions, ownership rules, and project context that every agent should see.",
@@ -468,7 +687,7 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
         metadata: metadataSchema,
         artifacts: z.array(artifactSchema).optional(),
       }),
-      handler: async (input: any) =>
+      handler: async (input) =>
         json({
           note: store.writeNote({
             agentId: agent.id,
@@ -483,7 +702,7 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
           }),
         }),
     }),
-    new DynamicTool({
+    communicationTool({
       name: "read_notes",
       description:
         "Read shared scratchpad notes by workspace, channel, pin state, or search query. Check pinned notes before starting work in an unfamiliar workspace.",
@@ -494,7 +713,7 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
         query: z.string().min(1).optional(),
         limit: z.number().int().min(1).max(200).optional(),
       }),
-      handler: async (input: any) =>
+      handler: async (input) =>
         json({
           notes: store.readNotes({
             workspace: input.workspace ?? agent.workspace,
@@ -505,20 +724,21 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
           }),
         }),
     }),
-    new DynamicTool({
+    communicationTool({
       name: "pin_note",
       description:
         "Pin or unpin a shared scratchpad note. Pinned notes should hold durable workspace conventions rather than transient status.",
       inputSchema: z.object({
+        workspace: workspaceSchema,
         note_id: z.string().min(1),
         pinned: z.boolean(),
       }),
-      handler: async (input: any) =>
+      handler: async (input) =>
         json({
-          note: store.pinNote(input.note_id, input.pinned),
+          note: store.pinNote(input.note_id, input.pinned, input.workspace ?? agent.workspace),
         }),
     }),
-    new DynamicTool({
+    communicationTool({
       name: "summarize_channel",
       description:
         "Return a compact structured digest of recent channel messages, tasks, and notes for quick orientation in a project channel.",
@@ -526,25 +746,31 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
         workspace: workspaceSchema,
         channel: z.string().min(1).optional(),
       }),
-      handler: async (input: any) =>
+      handler: async (input) =>
         json({
           summary: store.summarizeChannel(agent.id, input.workspace ?? agent.workspace, input.channel),
         }),
     }),
-    new DynamicTool({
+    communicationTool({
       name: "list_artifacts",
       description:
         "List structured artifact references attached to a message, task, or note so files, URLs, diffs, screenshots, logs, and commands are easy to resume from.",
       inputSchema: z.object({
+        workspace: workspaceSchema,
         owner_type: z.enum(["message", "task", "note"]),
         owner_id: z.string().min(1),
       }),
-      handler: async (input: any) =>
+      handler: async (input) =>
         json({
-          artifacts: store.listArtifacts(input.owner_type, input.owner_id),
+          artifacts: store.listVisibleArtifacts(
+            agent.id,
+            input.workspace ?? agent.workspace,
+            input.owner_type,
+            input.owner_id,
+          ),
         }),
     }),
-    new DynamicTool({
+    communicationTool({
       name: "acquire_lock",
       description:
         "Acquire or renew a cooperative advisory workspace-scoped lease for a file, module, task, or other resource before editing. This does not lock the filesystem; if another agent owns an active lock, coordinate instead of overwriting.",
@@ -554,7 +780,7 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
         purpose: z.string().min(1).optional(),
         ttl_seconds: z.number().int().min(1).max(86_400).optional(),
       }),
-      handler: async (input: any) =>
+      handler: async (input) =>
         json({
           lock: store.acquireLock({
             agentId: agent.id,
@@ -565,7 +791,7 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
           }),
         }),
     }),
-    new DynamicTool({
+    communicationTool({
       name: "release_lock",
       description:
         "Release a lock owned by the current agent after the edit or task is complete. Keep locks short-lived and renew them for long work.",
@@ -573,12 +799,12 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
         workspace: workspaceSchema,
         resource: z.string().min(1),
       }),
-      handler: async (input: any) =>
+      handler: async (input) =>
         json({
           lock: store.releaseLock(agent.id, input.resource, input.workspace ?? agent.workspace),
         }),
     }),
-    new DynamicTool({
+    communicationTool({
       name: "list_locks",
       description:
         "List active or expired workspace-scoped locks. Check this before editing shared files and include expired locks when auditing stale coordination state.",
@@ -587,7 +813,7 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
         resource: z.string().min(1).optional(),
         include_expired: z.boolean().optional(),
       }),
-      handler: async (input: any) =>
+      handler: async (input) =>
         json({
           locks: store.listLocks({
             workspace: input.workspace ?? agent.workspace,

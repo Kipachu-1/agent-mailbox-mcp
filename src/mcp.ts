@@ -1,9 +1,23 @@
-import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
+import {
+  McpServer,
+  ResourceTemplate,
+} from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { AnyTool, JSONToolOutput } from "beeai-framework/tools/base";
+import type { z } from "zod";
 import type { AgentConfig } from "./config";
 import { LocalCommsStore } from "./store";
 import { createCommunicationTools } from "./tools";
+
+type BeeAiToolRegistrar = (
+  name: string,
+  config: {
+    title?: string;
+    description?: string;
+    inputSchema?: z.ZodTypeAny;
+  },
+  callback: (input: unknown) => Promise<CallToolResult>,
+) => unknown;
 
 export function createLocalCommsMcpServer(store: LocalCommsStore, agent: AgentConfig): McpServer {
   const server = new McpServer(
@@ -33,38 +47,41 @@ export function createLocalCommsMcpServer(store: LocalCommsStore, agent: AgentCo
 }
 
 export function registerBeeAiTools(server: McpServer, tools: AnyTool[]): void {
+  const registerTool = server.registerTool.bind(server) as BeeAiToolRegistrar;
   for (const tool of tools) {
-    server.registerTool(
+    const inputSchema = tool.inputSchema() as z.ZodTypeAny;
+    const callback = async (input: unknown): Promise<CallToolResult> => {
+      try {
+        const output = (await tool.run(input)) as JSONToolOutput<unknown>;
+        return {
+          structuredContent: output.result as Record<string, unknown>,
+          content: [
+            {
+              type: "text",
+              text: output.getTextContent(),
+            },
+          ],
+        };
+      } catch (error) {
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: errorMessage(error),
+            },
+          ],
+        };
+      }
+    };
+    registerTool(
       tool.name,
       {
         title: tool.name,
         description: tool.description,
-        inputSchema: tool.inputSchema() as any,
+        inputSchema,
       },
-      async (input: any): Promise<CallToolResult> => {
-        try {
-          const output = (await tool.run(input)) as JSONToolOutput<unknown>;
-          return {
-            structuredContent: output.result as Record<string, unknown>,
-            content: [
-              {
-                type: "text",
-                text: output.getTextContent(),
-              },
-            ],
-          };
-        } catch (error) {
-          return {
-            isError: true,
-            content: [
-              {
-                type: "text",
-                text: errorMessage(error),
-              },
-            ],
-          };
-        }
-      },
+      callback,
     );
   }
 }

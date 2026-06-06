@@ -9,7 +9,7 @@ The server runs as one long-lived Bun process. Agents connect to `/mcp` with bea
 - **Streamable HTTP MCP** with stateful sessions at `/mcp`.
 - **Admin API** protected by `AGENT_MAILBOX_ADMIN_TOKEN`.
 - **Access keys** stored as hashed tokens; plaintext tokens are shown once on creation.
-- **Session startup digest** with `session_start` for unread handoffs, open tasks, stale claims, advisory locks, pinned notes, and online agents.
+- **Actionable session startup digest** with `session_start` for unread handoffs, open tasks, stale claims, advisory locks, pinned notes, online agents, summary counts, and ranked next actions.
 - **Direct and channel messaging** with threads, read state, metadata, and structured artifacts.
 - **Claimable tasks** with priorities, due dates, dependencies, blocked reasons, audit events, and file/URL/log/diff attachments.
 - **Automatic task notifications** when another agent marks your task `done`, `blocked`, or `cancelled`.
@@ -31,6 +31,52 @@ AGENT_MAILBOX_ADMIN_TOKEN="change-me" bun run http
 ```
 
 Use `AGENT_MAILBOX_ADMIN_TOKEN` as a bearer token for admin API calls that create and revoke agent access keys.
+
+## First Successful Handoff
+
+Use this path to prove the mailbox is useful before wiring it into every agent.
+
+1. Start the server:
+
+```bash
+AGENT_MAILBOX_ADMIN_TOKEN="change-me" bun run http
+```
+
+2. Create an access key for each agent. The plaintext token is returned only once:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8137/api/access-keys \
+  -H "Authorization: Bearer change-me" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Codex local","agent_id":"codex","agent_name":"Codex","workspace":"mcp"}'
+```
+
+3. Add the returned token to an MCP client:
+
+```json
+{
+  "mcpServers": {
+    "agent-mailbox": {
+      "url": "http://127.0.0.1:8137/mcp",
+      "headers": {
+        "Authorization": "Bearer <agent-access-token>"
+      }
+    }
+  }
+}
+```
+
+4. Have the agent call `session_start` first. The response includes `session_summary` counts and ranked `next_actions` so the agent can handle unread messages, stale claims, locks, or open tasks in priority order.
+5. Create a complete handoff with `create_handoff`, including acceptance criteria and artifacts. Use `notification_recipient_id`, `notification_channel`, or the task assignee/channel to notify another agent.
+6. The receiving agent calls `session_start`, handles unread messages, claims work, checks `active_locks`, then calls `acquire_lock` for files or resources it will edit.
+7. Finish with `finish_work`: set the task status, attach completion artifacts, optionally send a handoff note, and release owned locks.
+
+For local inspection without an MCP client, use:
+
+```bash
+LOCAL_AI_COMMS_AGENT_ID=codex LOCAL_AI_COMMS_WORKSPACE=mcp bun run cli doctor --format text
+LOCAL_AI_COMMS_AGENT_ID=codex LOCAL_AI_COMMS_WORKSPACE=mcp bun run cli session --format text
+```
 
 ## Scripts
 
@@ -182,9 +228,11 @@ Stale claimed tasks are reclaim candidates only after checking recent presence a
 ### Tasks
 
 - `create_task`: create a claimable handoff task with clear acceptance criteria and artifacts.
+- `create_handoff`: create a task and optional notification message in one workflow call.
 - `list_tasks`: list visible tasks. Use `stale_after_seconds` to find claimed tasks that have not changed recently.
 - `claim_task`: atomically claim an open task in the current workspace.
-- `update_task`: update status and workflow fields. `done`, `blocked`, and `cancelled` updates from another agent automatically notify the creator.
+- `update_task`: update status and workflow fields, with optional completion artifacts. `done`, `blocked`, and `cancelled` updates from another agent automatically notify the creator.
+- `finish_work`: update a task, optionally send a final handoff note, and release selected locks in one cleanup call.
 
 ### Notes, Artifacts, and Locks
 
@@ -202,6 +250,8 @@ Stale claimed tasks are reclaim candidates only after checking recent presence a
 The CLI is not an MCP transport. It is a local terminal helper that uses the same SQLite database and legacy local identity variables:
 
 ```bash
+LOCAL_AI_COMMS_AGENT_ID=codex bun run cli doctor --format text
+LOCAL_AI_COMMS_AGENT_ID=codex bun run cli session --format text
 LOCAL_AI_COMMS_AGENT_ID=codex bun run cli agents
 LOCAL_AI_COMMS_AGENT_ID=codex bun run cli inbox --channel handoffs --unread
 LOCAL_AI_COMMS_AGENT_ID=codex bun run cli send --to claude-code "please review"
@@ -210,6 +260,19 @@ LOCAL_AI_COMMS_AGENT_ID=codex bun run cli create-task --channel docs --title "Re
 LOCAL_AI_COMMS_AGENT_ID=codex bun run cli acquire-lock src/store.ts --purpose "editing"
 LOCAL_AI_COMMS_AGENT_ID=codex bun run cli release-lock src/store.ts
 ```
+
+JSON is the default CLI output for agents and scripts. Use `--format text` on `session` and `doctor` for a compact human-readable summary.
+
+## Troubleshooting
+
+| Symptom | Likely cause | Fix |
+| --- | --- | --- |
+| `401` from `/mcp` or admin routes | Missing bearer token, wrong access token, or wrong admin token. | Use `Authorization: Bearer <token>`. Admin routes require `AGENT_MAILBOX_ADMIN_TOKEN`; MCP requires an agent access token. |
+| `403` on an MCP request | A valid token is being used with another token's `mcp-session-id`. | Reinitialize the MCP client with the same bearer token used for the session. |
+| `404` on an MCP request | The MCP session was closed or the session id is unknown. | Reconnect the MCP client and start a new session. |
+| No tasks or messages appear | Agent tokens are mapped to different workspaces. | Check the key's `workspace` with `GET /api/access-keys` and use the same workspace for cooperating agents. |
+| A task looks abandoned | The assignee has not updated the task recently. | Check `session_start.stale_claimed_tasks`, `who_is_online`, and message context before reclaiming. |
+| Edits are blocked by an old lock | A lock expired or was left behind by an interrupted agent. | Use `list_locks` with `include_expired`, coordinate with the owner if active, then reacquire or release your own locks through normal tools. |
 
 ## MCP Resources
 

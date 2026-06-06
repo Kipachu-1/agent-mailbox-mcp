@@ -91,9 +91,10 @@ test("task updates append audit events", () => {
     taskId: task.id,
     status: "done",
     note: "README updated.",
+    artifacts: [{ type: "diff", path: "/tmp/README.patch", label: "completion diff" }],
   });
 
-  const events = store.listTaskEvents(task.id);
+  const events = store.listVisibleTaskEvents("claude", task.id);
   expect(done.status).toBe("done");
   expect(events.map((event) => event.event_type)).toEqual([
     "created",
@@ -101,6 +102,7 @@ test("task updates append audit events", () => {
     "status_changed",
   ]);
   expect(events.at(-1)?.note).toBe("README updated.");
+  expect(done.artifacts.map((artifact) => artifact.path)).toContain("/tmp/README.patch");
 
   const notifications = store.inbox("codex", { unreadOnly: true });
   const metadata = notifications[0]?.metadata as Record<string, unknown> | undefined;
@@ -109,7 +111,10 @@ test("task updates append audit events", () => {
   expect(notifications[0]?.body).toContain("Task completed: Review README");
   expect(metadata?.event_type).toBe("task_status_notification");
   expect(metadata?.task_id).toBe(task.id);
-  expect(notifications[0]?.artifacts[0]?.path).toBe("/tmp/README.md");
+  expect(notifications[0]?.artifacts.map((artifact) => artifact.path)).toContain("/tmp/README.md");
+  expect(notifications[0]?.artifacts.map((artifact) => artifact.path)).toContain(
+    "/tmp/README.patch",
+  );
 
   store.close();
 });
@@ -140,6 +145,119 @@ test("presence and workspace scoping isolate agents and messages", () => {
   expect(store.inbox("claude", { workspace: "repo-a", channel: "handoffs" })).toHaveLength(1);
 
   store.close();
+});
+
+test("same agent id keeps separate presence in each workspace", () => {
+  const { path } = tempDb();
+  const store = new LocalCommsStore(path);
+
+  store.heartbeat({
+    id: "codex",
+    name: "Codex A",
+    workspace: "repo-a",
+    status: "working",
+    currentTaskId: "task-a",
+  });
+  store.heartbeat({
+    id: "codex",
+    name: "Codex B",
+    workspace: "repo-b",
+    status: "available",
+    currentTaskId: "task-b",
+  });
+
+  expect(store.getAgent("codex", "repo-a")?.status).toBe("working");
+  expect(store.getAgent("codex", "repo-a")?.current_task_id).toBe("task-a");
+  expect(store.getAgent("codex", "repo-b")?.status).toBe("available");
+  expect(store.getAgent("codex", "repo-b")?.current_task_id).toBe("task-b");
+  expect(store.listAgents("repo-a").map((agent) => agent.name)).toEqual(["Codex A"]);
+  expect(store.listAgents("repo-b").map((agent) => agent.name)).toEqual(["Codex B"]);
+
+  store.close();
+});
+
+test("migration upgrades legacy agent primary key and task dependency foreign keys", () => {
+  const { path } = tempDb();
+  const now = new Date().toISOString();
+  const db = new Database(path);
+  db.exec(`
+    CREATE TABLE agents (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      workspace TEXT NOT NULL DEFAULT 'default',
+      status TEXT NOT NULL DEFAULT 'available',
+      current_task_id TEXT,
+      metadata TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      last_seen_at TEXT NOT NULL
+    );
+    INSERT INTO agents
+      (id, name, workspace, status, current_task_id, metadata, created_at, updated_at, last_seen_at)
+    VALUES
+      ('codex', 'Codex', 'repo-a', 'working', 'task-1', '{}', '${now}', '${now}', '${now}');
+
+    CREATE TABLE tasks (
+      id TEXT PRIMARY KEY,
+      workspace TEXT NOT NULL DEFAULT 'default',
+      title TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      creator_id TEXT NOT NULL,
+      assignee_id TEXT,
+      channel TEXT,
+      status TEXT NOT NULL CHECK (status IN ('open', 'claimed', 'done', 'blocked', 'cancelled')),
+      priority INTEGER NOT NULL DEFAULT 0,
+      due_at TEXT,
+      parent_task_id TEXT,
+      blocked_reason TEXT,
+      metadata TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    INSERT INTO tasks
+      (id, workspace, title, creator_id, status, created_at, updated_at)
+    VALUES
+      ('parent', 'repo-a', 'Parent', 'codex', 'open', '${now}', '${now}'),
+      ('child', 'repo-a', 'Child', 'codex', 'open', '${now}', '${now}');
+
+    CREATE TABLE task_dependencies (
+      task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+      depends_on_task_id TEXT NOT NULL,
+      PRIMARY KEY (task_id, depends_on_task_id)
+    );
+    INSERT INTO task_dependencies (task_id, depends_on_task_id)
+    VALUES ('child', 'parent'), ('child', 'missing');
+  `);
+  db.close();
+
+  const store = new LocalCommsStore(path);
+  expect(store.getAgent("codex", "repo-a")?.current_task_id).toBe("task-1");
+  expect(
+    store.listTasks("codex", { workspace: "repo-a", parentTaskId: undefined }).map((task) => task.id),
+  ).toContain("child");
+  store.close();
+
+  const migrated = new Database(path);
+  const agentColumns = migrated
+    .query<{ name: string; pk: number }, []>(`PRAGMA table_info(agents)`)
+    .all();
+  const dependencyForeignKeys = migrated
+    .query<{ from: string; table: string }, []>(`PRAGMA foreign_key_list(task_dependencies)`)
+    .all();
+  const dependencies = migrated
+    .query<{ depends_on_task_id: string }, []>(
+      `SELECT depends_on_task_id FROM task_dependencies ORDER BY depends_on_task_id`,
+    )
+    .all();
+  migrated.close();
+
+  expect(agentColumns.find((column) => column.name === "workspace")?.pk).toBe(1);
+  expect(agentColumns.find((column) => column.name === "id")?.pk).toBe(2);
+  expect(dependencyForeignKeys.map((key) => key.from).sort()).toEqual([
+    "depends_on_task_id",
+    "task_id",
+  ]);
+  expect(dependencies.map((dependency) => dependency.depends_on_task_id)).toEqual(["parent"]);
 });
 
 test("threads, replies, and message artifacts are preserved", () => {
@@ -234,6 +352,103 @@ test("notes, channel summaries, and update watching expose shared memory", () =>
   expect(JSON.stringify(summary)).toContain("Docs update.");
   expect(updates.messages.length).toBeGreaterThan(0);
   expect(updates.notes.length).toBeGreaterThan(0);
+
+  store.close();
+});
+
+test("notes cannot be overwritten or pinned across workspaces", () => {
+  const { path } = tempDb();
+  const store = new LocalCommsStore(path);
+
+  const note = store.writeNote({
+    agentId: "codex",
+    workspace: "repo-a",
+    noteId: "shared-note",
+    title: "Repo A",
+    body: "Repo A context.",
+  });
+
+  expect(() =>
+    store.writeNote({
+      agentId: "claude",
+      workspace: "repo-b",
+      noteId: note.id,
+      title: "Repo B",
+      body: "Attempted overwrite.",
+    }),
+  ).toThrow(/not in workspace 'repo-b'/);
+  expect(() => store.pinNote(note.id, true, "repo-b")).toThrow(/not in workspace 'repo-b'/);
+  expect(store.pinNote(note.id, true, "repo-a").pinned).toBe(true);
+  expect(store.readNotes({ workspace: "repo-a" })[0]?.title).toBe("Repo A");
+  expect(store.readNotes({ workspace: "repo-b" })).toHaveLength(0);
+
+  store.close();
+});
+
+test("watch updates only returns task events visible to the requesting agent", () => {
+  const { path } = tempDb();
+  const store = new LocalCommsStore(path);
+  const since = new Date(Date.now() - 1000).toISOString();
+
+  const task = store.createTask({
+    creatorId: "codex",
+    workspace: "repo-a",
+    title: "Private task",
+    assigneeId: "claude",
+  });
+  store.updateTask({
+    agentId: "claude",
+    workspace: "repo-a",
+    taskId: task.id,
+    status: "done",
+  });
+
+  expect(store.updatesSince("cursor", "repo-a", since).task_events).toHaveLength(0);
+  expect(store.updatesSince("codex", "repo-a", since).task_events.length).toBeGreaterThan(0);
+  expect(store.updatesSince("claude", "repo-a", since).task_events.length).toBeGreaterThan(0);
+
+  store.close();
+});
+
+test("task updates and artifacts require owner visibility", () => {
+  const { path } = tempDb();
+  const store = new LocalCommsStore(path);
+
+  const message = store.sendMessage({
+    senderId: "codex",
+    workspace: "repo-a",
+    recipientId: "claude",
+    body: "Private message.",
+    artifacts: [{ type: "file", path: "/tmp/private.ts" }],
+  });
+  const task = store.createTask({
+    creatorId: "codex",
+    workspace: "repo-a",
+    title: "Private task",
+    assigneeId: "claude",
+    artifacts: [{ type: "url", url: "https://example.com/private" }],
+  });
+
+  expect(store.listVisibleArtifacts("claude", "repo-a", "message", message.id)[0]?.path).toBe(
+    "/tmp/private.ts",
+  );
+  expect(store.listVisibleArtifacts("claude", "repo-a", "task", task.id)[0]?.url).toBe(
+    "https://example.com/private",
+  );
+  expect(() => store.listVisibleArtifacts("cursor", "repo-a", "message", message.id)).toThrow(
+    /not visible/,
+  );
+  expect(() => store.listVisibleArtifacts("cursor", "repo-a", "task", task.id)).toThrow(
+    /not visible/,
+  );
+  expect(() =>
+    store.updateTask({
+      agentId: "cursor",
+      workspace: "repo-a",
+      taskId: task.id,
+      status: "done",
+    }),
+  ).toThrow(/not visible/);
 
   store.close();
 });
