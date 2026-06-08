@@ -13,5 +13,5 @@ COPY --from=install /app/node_modules ./node_modules
 COPY package.json bun.lock tsconfig.json ./
 COPY src ./src
 
-EXPOSE 8137
+EXPOSE 8080
 CMD ["bun", "run", "http"]
