@@ -5,6 +5,7 @@ import {
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { AnyTool, JSONToolOutput } from "beeai-framework/tools/base";
 import type { z } from "zod";
+import type { ArtifactStorage } from "./artifact-storage";
 import type { AgentConfig } from "./config";
 import { LocalCommsStore } from "./store";
 import { createCommunicationTools } from "./tools";
@@ -19,7 +20,11 @@ type BeeAiToolRegistrar = (
   callback: (input: unknown) => Promise<CallToolResult>,
 ) => unknown;
 
-export function createLocalCommsMcpServer(store: LocalCommsStore, agent: AgentConfig): McpServer {
+export function createLocalCommsMcpServer(
+  store: LocalCommsStore,
+  agent: AgentConfig,
+  artifactStorage?: ArtifactStorage,
+): McpServer {
   const server = new McpServer(
     {
       name: "agent-mailbox",
@@ -28,12 +33,12 @@ export function createLocalCommsMcpServer(store: LocalCommsStore, agent: AgentCo
     {
       instructions:
         [
-          "Use Agent Mailbox tools to coordinate with local AI agents through a shared SQLite mailbox.",
+          "Use Agent Mailbox tools to coordinate with local AI agents through a shared mailbox.",
           "At the start of each work session, call session_start before reading code, editing files, or claiming work; it refreshes presence and returns unread messages, tasks, advisory locks, pinned notes, and stale claims.",
           "This server is pull-based: agents only see changes when they call inbox, watch_updates, session_start, list_tasks, or related tools.",
           "Before editing a shared file or module, call acquire_lock for that resource; these locks are cooperative advisory leases, not filesystem locks, so respect active locks owned by other agents.",
           "Release locks with release_lock when finished and renew long work with heartbeat or acquire_lock.",
-          "When handing off work, attach artifacts for the relevant files, URLs, diffs, screenshots, logs, or commands.",
+          "When handing off work, attach artifacts for the relevant files, URLs, diffs, screenshots, logs, commands, or uploaded S3-backed content.",
           "When finishing, blocking, or cancelling a task, call update_task with a specific note; creator notifications for done, blocked, and cancelled are sent automatically.",
           "Treat stale claimed tasks as reclaim candidates only after checking recent presence and message context.",
           "Use a distinct workspace per repository or project so unrelated agents do not share task, note, message, and lock state.",
@@ -41,7 +46,7 @@ export function createLocalCommsMcpServer(store: LocalCommsStore, agent: AgentCo
     },
   );
 
-  registerBeeAiTools(server, createCommunicationTools(store, agent));
+  registerBeeAiTools(server, createCommunicationTools(store, agent, artifactStorage));
   registerResources(server, store, agent);
   return server;
 }
@@ -96,7 +101,7 @@ function registerResources(server: McpServer, store: LocalCommsStore, agent: Age
       description: "Registered local AI agents for this mailbox.",
       mimeType: "application/json",
     },
-    (uri) => jsonResource(uri.toString(), { agents: store.listAgents(workspace) }),
+    async (uri) => jsonResource(uri.toString(), { agents: await store.listAgents(workspace) }),
   );
 
   server.registerResource(
@@ -107,9 +112,9 @@ function registerResources(server: McpServer, store: LocalCommsStore, agent: Age
       description: "Open handoff tasks visible to this agent.",
       mimeType: "application/json",
     },
-    (uri) =>
+    async (uri) =>
       jsonResource(uri.toString(), {
-        tasks: store.listTasks(agent.id, { workspace, status: "open", limit: 200 }),
+        tasks: await store.listTasks(agent.id, { workspace, status: "open", limit: 200 }),
       }),
   );
 
@@ -121,7 +126,7 @@ function registerResources(server: McpServer, store: LocalCommsStore, agent: Age
       description: "Active workspace-scoped locks.",
       mimeType: "application/json",
     },
-    (uri) => jsonResource(uri.toString(), { locks: store.listLocks({ workspace }) }),
+    async (uri) => jsonResource(uri.toString(), { locks: await store.listLocks({ workspace }) }),
   );
 
   server.registerResource(
@@ -132,9 +137,9 @@ function registerResources(server: McpServer, store: LocalCommsStore, agent: Age
       description: "Pinned scratchpad notes in this workspace.",
       mimeType: "application/json",
     },
-    (uri) =>
+    async (uri) =>
       jsonResource(uri.toString(), {
-        notes: store.readNotes({ workspace, pinnedOnly: true, limit: 200 }),
+        notes: await store.readNotes({ workspace, pinnedOnly: true, limit: 200 }),
       }),
   );
 
@@ -146,10 +151,10 @@ function registerResources(server: McpServer, store: LocalCommsStore, agent: Age
       description: "Recent messages for a workspace channel.",
       mimeType: "application/json",
     },
-    (uri, variables) => {
+    async (uri, variables) => {
       const channel = String((variables as Record<string, string>).channel);
       return jsonResource(uri.toString(), {
-        messages: store.inbox(agent.id, {
+        messages: await store.inbox(agent.id, {
           workspace,
           channel,
           includeSent: true,

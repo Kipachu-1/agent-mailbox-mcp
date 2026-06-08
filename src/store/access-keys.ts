@@ -10,10 +10,10 @@ import {
 } from "./mappers";
 import type { AccessKeyRecord, CreateAccessKeyInput, CreatedAccessKeyRecord } from "./types";
 
-export function createAccessKey(
+export async function createAccessKey(
   ctx: StoreContext,
   input: CreateAccessKeyInput,
-): CreatedAccessKeyRecord {
+): Promise<CreatedAccessKeyRecord> {
   const now = isoNow();
   const token = input.token?.trim() || generateAccessToken();
   const id = crypto.randomUUID();
@@ -32,7 +32,7 @@ export function createAccessKey(
   }
   const hash = tokenHash(token);
 
-  ctx.run(
+  await ctx.run(
     `INSERT INTO access_keys
        (id, token_hash, token_prefix, name, agent_id, agent_name, workspace, enabled, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
@@ -56,25 +56,25 @@ export function createAccessKey(
     ],
   );
 
-  const key = getAccessKeyByHash(ctx, hash);
+  const key = await getAccessKeyByHash(ctx, hash);
   if (!key) {
     throw new Error(`Failed to create access key '${id}'.`);
   }
   return { key, token };
 }
 
-export function listAccessKeys(ctx: StoreContext): AccessKeyRecord[] {
-  return ctx.all<AccessKeyRow>(
+export async function listAccessKeys(ctx: StoreContext): Promise<AccessKeyRecord[]> {
+  return (await ctx.all<AccessKeyRow>(
     `SELECT * FROM access_keys ORDER BY updated_at DESC, created_at DESC`,
     [],
-  ).map(mapAccessKey);
+  )).map(mapAccessKey);
 }
 
-export function authenticateAccessToken(
+export async function authenticateAccessToken(
   ctx: StoreContext,
   token: string,
-): AccessKeyRecord | null {
-  const row = ctx.get<AccessKeyRow>(
+): Promise<AccessKeyRecord | null> {
+  const row = await ctx.get<AccessKeyRow>(
     `SELECT * FROM access_keys WHERE token_hash = ? AND enabled = 1`,
     [tokenHash(token)],
   );
@@ -83,7 +83,7 @@ export function authenticateAccessToken(
   }
 
   const now = isoNow();
-  ctx.run(`UPDATE access_keys SET last_used_at = ?, updated_at = ? WHERE id = ?`, [
+  await ctx.run(`UPDATE access_keys SET last_used_at = ?, updated_at = ? WHERE id = ?`, [
     now,
     now,
     row.id,
@@ -91,21 +91,21 @@ export function authenticateAccessToken(
   return getAccessKey(ctx, row.id);
 }
 
-export function revokeAccessKey(ctx: StoreContext, id: string): AccessKeyRecord {
-  ctx.run(`UPDATE access_keys SET enabled = 0, updated_at = ? WHERE id = ?`, [isoNow(), id]);
-  const key = getAccessKey(ctx, id);
+export async function revokeAccessKey(ctx: StoreContext, id: string): Promise<AccessKeyRecord> {
+  await ctx.run(`UPDATE access_keys SET enabled = 0, updated_at = ? WHERE id = ?`, [isoNow(), id]);
+  const key = await getAccessKey(ctx, id);
   if (!key) {
     throw new Error(`Access key '${id}' does not exist.`);
   }
   return key;
 }
 
-function getAccessKey(ctx: StoreContext, id: string): AccessKeyRecord | null {
-  const row = ctx.get<AccessKeyRow>(`SELECT * FROM access_keys WHERE id = ?`, [id]);
+async function getAccessKey(ctx: StoreContext, id: string): Promise<AccessKeyRecord | null> {
+  const row = await ctx.get<AccessKeyRow>(`SELECT * FROM access_keys WHERE id = ?`, [id]);
   return row ? mapAccessKey(row) : null;
 }
 
-function getAccessKeyByHash(ctx: StoreContext, hash: string): AccessKeyRecord | null {
-  const row = ctx.get<AccessKeyRow>(`SELECT * FROM access_keys WHERE token_hash = ?`, [hash]);
+async function getAccessKeyByHash(ctx: StoreContext, hash: string): Promise<AccessKeyRecord | null> {
+  const row = await ctx.get<AccessKeyRow>(`SELECT * FROM access_keys WHERE token_hash = ?`, [hash]);
   return row ? mapAccessKey(row) : null;
 }

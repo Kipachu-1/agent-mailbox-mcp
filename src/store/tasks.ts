@@ -1,7 +1,6 @@
-import type { SQLQueryBindings } from "bun:sqlite";
 import { insertArtifacts, listArtifacts } from "./artifacts";
 import { visibleTaskClause } from "./context";
-import type { StoreContext } from "./context";
+import type { StoreContext, StoreValue } from "./context";
 import {
   emptyToNull,
   encodeJson,
@@ -28,13 +27,12 @@ import type {
   UpdateTaskInput,
 } from "./types";
 
-export function createTask(ctx: StoreContext, input: CreateTaskInput): TaskRecord {
+export async function createTask(ctx: StoreContext, input: CreateTaskInput): Promise<TaskRecord> {
   const workspace = workspaceOf(input.workspace);
   const now = isoNow();
   const id = crypto.randomUUID();
-  ctx.exec("BEGIN IMMEDIATE");
-  try {
-    ctx.run(
+  await ctx.transaction(async (tx) => {
+    await tx.run(
       `INSERT INTO tasks
          (id, workspace, title, description, creator_id, assignee_id, channel, status,
           priority, due_at, parent_task_id, blocked_reason, metadata, created_at, updated_at)
@@ -56,48 +54,45 @@ export function createTask(ctx: StoreContext, input: CreateTaskInput): TaskRecor
         now,
       ],
     );
-    replaceTaskDependencies(ctx, id, input.dependencies ?? []);
-    insertArtifacts(ctx, "task", id, input.artifacts ?? []);
-    insertTaskEvent(ctx, id, input.creatorId, "created", "open", "Task created.");
-    ctx.exec("COMMIT");
-  } catch (error) {
-    ctx.exec("ROLLBACK");
-    throw error;
-  }
+    await replaceTaskDependencies(tx, id, input.dependencies ?? []);
+    await insertArtifacts(tx, "task", id, input.artifacts ?? []);
+    await insertTaskEvent(tx, id, input.creatorId, "created", "open", "Task created.");
+  });
 
-  const task = getTask(ctx, id);
+  const task = await getTask(ctx, id);
   if (!task) {
     throw new Error(`Failed to create task '${id}'.`);
   }
   return task;
 }
 
-export function listTasks(
+export async function listTasks(
   ctx: StoreContext,
   agentId: string,
   options: ListTasksOptions = {},
-): TaskRecord[] {
+): Promise<TaskRecord[]> {
   const workspace = workspaceOf(options.workspace);
   const clauses = ["workspace = ?", visibleTaskClause()];
-  const params: SQLQueryBindings[] = [workspace, agentId, agentId];
+  const params: StoreValue[] = [workspace, agentId, agentId];
 
   addTaskFilters(clauses, params, options);
   params.push(limit(options.limit));
-  return ctx.all<TaskRow>(
+  const rows = await ctx.all<TaskRow>(
     `SELECT * FROM tasks
      WHERE ${clauses.join(" AND ")}
      ORDER BY priority DESC, updated_at DESC
      LIMIT ?`,
     params,
-  ).map((row) => taskWithRelations(ctx, row));
+  );
+  return Promise.all(rows.map((row) => taskWithRelations(ctx, row)));
 }
 
-export function listAllTasks(
+export async function listAllTasks(
   ctx: StoreContext,
   options: Omit<ListTasksOptions, "assigneeId" | "creatorId"> = {},
-): TaskRecord[] {
+): Promise<TaskRecord[]> {
   const clauses: string[] = [];
-  const params: SQLQueryBindings[] = [];
+  const params: StoreValue[] = [];
 
   if (options.workspace) {
     clauses.push("workspace = ?");
@@ -107,34 +102,34 @@ export function listAllTasks(
 
   const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
   params.push(limit(options.limit));
-  return ctx.all<TaskRow>(
+  const rows = await ctx.all<TaskRow>(
     `SELECT * FROM tasks
      ${where}
      ORDER BY priority DESC, updated_at DESC
      LIMIT ?`,
     params,
-  ).map((row) => taskWithRelations(ctx, row));
+  );
+  return Promise.all(rows.map((row) => taskWithRelations(ctx, row)));
 }
 
-export function claimTask(
+export async function claimTask(
   ctx: StoreContext,
   agentId: string,
   taskId: string,
   note?: string,
   workspace?: string,
-): TaskRecord {
+): Promise<TaskRecord> {
   const now = isoNow();
   const scope = workspace ? workspaceOf(workspace) : undefined;
   const workspaceClause = scope ? "AND workspace = ?" : "";
-  const params: SQLQueryBindings[] = [agentId, now, taskId];
+  const params: StoreValue[] = [agentId, now, taskId];
   if (scope) {
     params.push(scope);
   }
   params.push(agentId);
 
-  ctx.exec("BEGIN IMMEDIATE");
-  try {
-    const result = ctx.run(
+  await ctx.transaction(async (tx) => {
+    const result = await tx.run(
       `UPDATE tasks
        SET assignee_id = ?, status = 'claimed', updated_at = ?
        WHERE id = ?
@@ -145,7 +140,7 @@ export function claimTask(
     );
 
     if (result.changes === 0) {
-      const existing = getTask(ctx, taskId);
+      const existing = await getTask(tx, taskId);
       if (!existing) {
         throw new Error(`Task '${taskId}' does not exist.`);
       }
@@ -155,27 +150,22 @@ export function claimTask(
       throw new Error(`Task '${taskId}' cannot be claimed from status '${existing.status}'.`);
     }
 
-    insertTaskEvent(ctx, taskId, agentId, "claimed", "claimed", note ?? "Task claimed.");
-    ctx.exec("COMMIT");
-  } catch (error) {
-    ctx.exec("ROLLBACK");
-    throw error;
-  }
+    await insertTaskEvent(tx, taskId, agentId, "claimed", "claimed", note ?? "Task claimed.");
+  });
 
-  const task = getTask(ctx, taskId);
+  const task = await getTask(ctx, taskId);
   if (!task) {
     throw new Error(`Task '${taskId}' disappeared after claiming.`);
   }
   return task;
 }
 
-export function updateTask(ctx: StoreContext, input: UpdateTaskInput): TaskRecord {
+export async function updateTask(ctx: StoreContext, input: UpdateTaskInput): Promise<TaskRecord> {
   const now = isoNow();
   let shouldNotifyCreator = false;
-  ctx.exec("BEGIN IMMEDIATE");
-  try {
+  await ctx.transaction(async (tx) => {
     const scope = workspaceOf(input.workspace);
-    const existing = getVisibleTaskForAgent(ctx, input.agentId, input.taskId, scope);
+    const existing = await getVisibleTaskForAgent(tx, input.agentId, input.taskId, scope);
     if (!existing) {
       throw new Error(`Task '${input.taskId}' is not visible to agent '${input.agentId}'.`);
     }
@@ -189,56 +179,52 @@ export function updateTask(ctx: StoreContext, input: UpdateTaskInput): TaskRecor
       existing.status !== input.status &&
       shouldNotifyForStatus(input.status);
 
-    ctx.run(
+    await tx.run(
       `UPDATE tasks
        SET status = ?, priority = ?, due_at = ?, blocked_reason = ?, updated_at = ?
        WHERE id = ?`,
       [input.status, priority, dueAt, blockedReason, now, input.taskId],
     );
-    insertArtifacts(ctx, "task", input.taskId, input.artifacts ?? []);
-    insertTaskEvent(ctx, input.taskId, input.agentId, "status_changed", input.status, input.note);
-    ctx.exec("COMMIT");
-  } catch (error) {
-    ctx.exec("ROLLBACK");
-    throw error;
-  }
+    await insertArtifacts(tx, "task", input.taskId, input.artifacts ?? []);
+    await insertTaskEvent(tx, input.taskId, input.agentId, "status_changed", input.status, input.note);
+  });
 
-  const task = getTask(ctx, input.taskId);
+  const task = await getTask(ctx, input.taskId);
   if (!task) {
     throw new Error(`Task '${input.taskId}' disappeared after updating.`);
   }
   if (shouldNotifyCreator) {
-    sendTaskStatusNotification(ctx, input.agentId, task, input.note);
+    await sendTaskStatusNotification(ctx, input.agentId, task, input.note);
   }
   return task;
 }
 
-export function listVisibleTaskEvents(
+export async function listVisibleTaskEvents(
   ctx: StoreContext,
   agentId: string,
   taskId: string,
   workspace?: string,
-): TaskEventRecord[] {
+): Promise<TaskEventRecord[]> {
   const scope = workspaceOf(workspace);
-  const task = getVisibleTaskForAgent(ctx, agentId, taskId, scope);
+  const task = await getVisibleTaskForAgent(ctx, agentId, taskId, scope);
   if (!task) {
     throw new Error(`Task '${taskId}' is not visible to agent '${agentId}'.`);
   }
   return listTaskEvents(ctx, taskId);
 }
 
-export function getTask(ctx: StoreContext, taskId: string): TaskRecord | null {
-  const row = ctx.get<TaskRow>(`SELECT * FROM tasks WHERE id = ?`, [taskId]);
+export async function getTask(ctx: StoreContext, taskId: string): Promise<TaskRecord | null> {
+  const row = await ctx.get<TaskRow>(`SELECT * FROM tasks WHERE id = ?`, [taskId]);
   return row ? taskWithRelations(ctx, row) : null;
 }
 
-export function getVisibleTaskForAgent(
+export async function getVisibleTaskForAgent(
   ctx: StoreContext,
   agentId: string,
   taskId: string,
   workspace: string,
-): TaskRecord | null {
-  const row = ctx.get<TaskRow>(
+): Promise<TaskRecord | null> {
+  const row = await ctx.get<TaskRow>(
     `SELECT * FROM tasks
      WHERE id = ? AND workspace = ? AND ${visibleTaskClause()}`,
     [taskId, workspace, agentId, agentId],
@@ -246,10 +232,10 @@ export function getVisibleTaskForAgent(
   return row ? taskWithRelations(ctx, row) : null;
 }
 
-export function taskWithRelations(ctx: StoreContext, row: TaskRow): TaskRecord {
+export async function taskWithRelations(ctx: StoreContext, row: TaskRow): Promise<TaskRecord> {
   return {
     ...mapTask(row),
-    dependencies: taskDependencies(ctx, row.id),
-    artifacts: listArtifacts(ctx, "task", row.id),
+    dependencies: await taskDependencies(ctx, row.id),
+    artifacts: await listArtifacts(ctx, "task", row.id),
   };
 }

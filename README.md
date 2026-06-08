@@ -1,6 +1,6 @@
 # Agent Mailbox MCP
 
-Agent Mailbox MCP is a deployable Streamable HTTP MCP server for coordinating AI coding agents across repos, machines, and runtimes. It provides one shared SQLite mailbox for messages, threads, tasks, notes, artifacts, presence, and cooperative advisory locks.
+Agent Mailbox MCP is a deployable Streamable HTTP MCP server for coordinating AI coding agents across repos, machines, and runtimes. It provides one shared mailbox for messages, threads, tasks, notes, artifacts, presence, and cooperative advisory locks. SQLite is the local default; Postgres is supported for deployments through Bun's native SQL client.
 
 The server runs as one long-lived Bun process. Agents connect to `/mcp` with bearer tokens. Each token maps to one agent identity and workspace. Access keys are managed through the admin API or optional bootstrap config.
 
@@ -95,10 +95,23 @@ LOCAL_AI_COMMS_AGENT_ID=codex LOCAL_AI_COMMS_WORKSPACE=mcp bun run cli session -
 | `AGENT_MAILBOX_HTTP_HOST` | No | Bind host. Defaults to `127.0.0.1`. |
 | `AGENT_MAILBOX_HTTP_PORT` | No | Bind port. Falls back to `PORT`, then `8137`. |
 | `AGENT_MAILBOX_HTTP_PATH` | No | MCP endpoint path. Defaults to `/mcp`. |
-| `AGENT_MAILBOX_DB` | No | SQLite path for HTTP mode. Falls back to `LOCAL_AI_COMMS_DB`, then `$HOME/.local/share/local-ai-comms.sqlite`. |
+| `DATABASE_URL` | No | Postgres connection URL. When set, HTTP and CLI use Postgres instead of SQLite. |
+| `AGENT_MAILBOX_DB` | No | SQLite path for HTTP mode when `DATABASE_URL` is not set. Falls back to `LOCAL_AI_COMMS_DB`, then `$HOME/.local/share/local-ai-comms.sqlite`. |
 | `AGENT_MAILBOX_HTTP_TOKENS` | No | Optional JSON array for bootstrapping agent access keys at process start. |
 
 The `LOCAL_AI_COMMS_DB` fallback and `local-ai-comms.sqlite` default path are retained intentionally so existing local data keeps working. MCP tool names and `local-comms://...` resource URIs are also retained.
+
+### S3 Artifact Storage
+
+Without S3 config, artifacts remain structured references (`path`, `url`, metadata). When S3 config is present, the MCP server also exposes tools for uploaded artifact content.
+
+| Variable | Required for S3 | Description |
+| --- | --- | --- |
+| `AWS_ACCESS_KEY_ID` | Yes | S3-compatible access key. `S3_ACCESS_KEY_ID` also works. |
+| `AWS_SECRET_ACCESS_KEY` | Yes | S3-compatible secret key. `S3_SECRET_ACCESS_KEY` also works. |
+| `AWS_DEFAULT_REGION` | Yes | Region passed to Bun S3. `AWS_REGION` or `S3_REGION` also works. |
+| `AWS_ENDPOINT_URL` | No | S3-compatible endpoint, such as R2, MinIO, or custom object storage. `AWS_ENDPOINT` or `S3_ENDPOINT` also works. |
+| `AWS_S3_BUCKET_NAME` | Yes | Artifact bucket. `AWS_BUCKET` or `S3_BUCKET` also works. |
 
 ### Bootstrap Keys
 
@@ -241,13 +254,16 @@ Stale claimed tasks are reclaim candidates only after checking recent presence a
 - `pin_note`: pin or unpin a note.
 - `summarize_channel`: return a compact channel digest.
 - `list_artifacts`: list references attached to a message, task, or note.
+- `upload_artifact`: upload artifact content to S3 and attach it to a visible message, task, or note.
+- `read_artifact_content`: read S3-backed artifact content as text or base64.
+- `presign_artifact`: create a short-lived download URL for S3-backed artifact content.
 - `acquire_lock`: acquire or renew a cooperative advisory lease for a resource before editing. This does not prevent file writes by the OS, Git, editors, or shell commands.
 - `release_lock`: release a lock you own.
 - `list_locks`: list active or expired locks.
 
 ## CLI
 
-The CLI is not an MCP transport. It is a local terminal helper that uses the same SQLite database and legacy local identity variables:
+The CLI is not an MCP transport. It is a local terminal helper that uses the same store as HTTP mode. Set `DATABASE_URL` to point it at Postgres, or omit it to use the local SQLite database and legacy local identity variables:
 
 ```bash
 LOCAL_AI_COMMS_AGENT_ID=codex bun run cli doctor --format text
@@ -290,7 +306,7 @@ These `local-comms://` resource URIs are intentionally kept stable for existing 
 
 This is a polling mailbox, not a push notification daemon. `watch_updates` can hold a tool call open for bounded near-live behavior, but it cannot wake a sleeping agent.
 
-Locks are cooperative advisory records in SQLite, not filesystem locks. They work when agents call `acquire_lock` before editing, respect locks owned by others, and call `release_lock` after finishing.
+Locks are cooperative advisory records in the mailbox database, not filesystem locks. They work when agents call `acquire_lock` before editing, respect locks owned by others, and call `release_lock` after finishing.
 
 Presence is heartbeat-based. An agent that crashes may look claimed or recently online until timestamps age out, which is why stale claimed task checks are exposed explicitly.
 
@@ -310,4 +326,4 @@ Run TypeScript checks:
 bun run typecheck
 ```
 
-SQLite uses WAL mode and `busy_timeout` so multiple MCP sessions and local CLI calls can share the same database safely.
+SQLite uses WAL mode and `busy_timeout` so multiple MCP sessions and local CLI calls can share the same database safely. Postgres integration tests are gated by `AGENT_MAILBOX_TEST_DATABASE_URL`.

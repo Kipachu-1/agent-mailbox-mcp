@@ -13,80 +13,80 @@ afterEach(() => {
   }
 });
 
-test("two store instances communicate through the same sqlite database", () => {
+test("two store instances communicate through the same sqlite database", async () => {
   const { path } = tempDb();
-  const codex = new LocalCommsStore(path);
-  const claude = new LocalCommsStore(path);
+  const codex = await LocalCommsStore.openSqlite(path);
+  const claude = await LocalCommsStore.openSqlite(path);
 
-  codex.registerAgent({ id: "codex", name: "Codex" });
-  claude.registerAgent({ id: "claude", name: "Claude Code" });
+  await codex.registerAgent({ id: "codex", name: "Codex" });
+  await claude.registerAgent({ id: "claude", name: "Claude Code" });
 
-  const message = codex.sendMessage({
+  const message = await codex.sendMessage({
     senderId: "codex",
     recipientId: "claude",
     body: "Can you inspect the failing test?",
   });
 
-  expect(claude.inbox("claude").map((item) => item.id)).toContain(message.id);
-  expect(codex.inbox("codex").map((item) => item.id)).toContain(message.id);
-  expect(claude.inbox("cursor").map((item) => item.id)).not.toContain(message.id);
+  expect((await claude.inbox("claude")).map((item) => item.id)).toContain(message.id);
+  expect((await codex.inbox("codex")).map((item) => item.id)).toContain(message.id);
+  expect((await claude.inbox("cursor")).map((item) => item.id)).not.toContain(message.id);
 
-  codex.close();
-  claude.close();
+  await codex.close();
+  await claude.close();
 });
 
-test("channel messages keep independent per-agent read state", () => {
+test("channel messages keep independent per-agent read state", async () => {
   const { path } = tempDb();
-  const store = new LocalCommsStore(path);
+  const store = await LocalCommsStore.openSqlite(path);
 
-  const message = store.sendMessage({
+  const message = await store.sendMessage({
     senderId: "codex",
     channel: "handoffs",
     body: "Shared channel update.",
   });
 
-  expect(store.inbox("claude", { unreadOnly: true }).map((item) => item.id)).toContain(message.id);
-  expect(store.inbox("cursor", { unreadOnly: true }).map((item) => item.id)).toContain(message.id);
+  expect((await store.inbox("claude", { unreadOnly: true })).map((item) => item.id)).toContain(message.id);
+  expect((await store.inbox("cursor", { unreadOnly: true })).map((item) => item.id)).toContain(message.id);
 
-  const read = store.readMessage("claude", message.id);
+  const read = await store.readMessage("claude", message.id);
   expect(read.unread).toBe(false);
   expect(read.read_at).toBeString();
 
-  expect(store.inbox("claude", { unreadOnly: true }).map((item) => item.id)).not.toContain(message.id);
-  expect(store.inbox("cursor", { unreadOnly: true }).map((item) => item.id)).toContain(message.id);
+  expect((await store.inbox("claude", { unreadOnly: true })).map((item) => item.id)).not.toContain(message.id);
+  expect((await store.inbox("cursor", { unreadOnly: true })).map((item) => item.id)).toContain(message.id);
 
-  store.close();
+  await store.close();
 });
 
-test("claim_task atomically rejects already claimed tasks", () => {
+test("claim_task atomically rejects already claimed tasks", async () => {
   const { path } = tempDb();
-  const store = new LocalCommsStore(path);
-  const task = store.createTask({
+  const store = await LocalCommsStore.openSqlite(path);
+  const task = await store.createTask({
     creatorId: "codex",
     title: "Implement mailbox server",
   });
 
-  const claimed = store.claimTask("claude", task.id);
+  const claimed = await store.claimTask("claude", task.id);
   expect(claimed.status).toBe("claimed");
   expect(claimed.assignee_id).toBe("claude");
 
-  expect(() => store.claimTask("cursor", task.id)).toThrow(/cannot be claimed/);
+  await expect(store.claimTask("cursor", task.id)).rejects.toThrow(/cannot be claimed/);
 
-  store.close();
+  await store.close();
 });
 
-test("task updates append audit events", () => {
+test("task updates append audit events", async () => {
   const { path } = tempDb();
-  const store = new LocalCommsStore(path);
-  const task = store.createTask({
+  const store = await LocalCommsStore.openSqlite(path);
+  const task = await store.createTask({
     creatorId: "codex",
     title: "Review README",
     channel: "docs",
     artifacts: [{ type: "file", path: "/tmp/README.md", line: 1, label: "README" }],
   });
 
-  store.claimTask("claude", task.id, "Taking this.");
-  const done = store.updateTask({
+  await store.claimTask("claude", task.id, "Taking this.");
+  const done = await store.updateTask({
     agentId: "claude",
     taskId: task.id,
     status: "done",
@@ -94,7 +94,7 @@ test("task updates append audit events", () => {
     artifacts: [{ type: "diff", path: "/tmp/README.patch", label: "completion diff" }],
   });
 
-  const events = store.listVisibleTaskEvents("claude", task.id);
+  const events = await store.listVisibleTaskEvents("claude", task.id);
   expect(done.status).toBe("done");
   expect(events.map((event) => event.event_type)).toEqual([
     "created",
@@ -104,7 +104,7 @@ test("task updates append audit events", () => {
   expect(events.at(-1)?.note).toBe("README updated.");
   expect(done.artifacts.map((artifact) => artifact.path)).toContain("/tmp/README.patch");
 
-  const notifications = store.inbox("codex", { unreadOnly: true });
+  const notifications = await store.inbox("codex", { unreadOnly: true });
   const metadata = notifications[0]?.metadata as Record<string, unknown> | undefined;
   expect(notifications[0]?.recipient_id).toBe("codex");
   expect(notifications[0]?.sender_id).toBe("claude");
@@ -116,49 +116,49 @@ test("task updates append audit events", () => {
     "/tmp/README.patch",
   );
 
-  store.close();
+  await store.close();
 });
 
-test("presence and workspace scoping isolate agents and messages", () => {
+test("presence and workspace scoping isolate agents and messages", async () => {
   const { path } = tempDb();
-  const store = new LocalCommsStore(path);
+  const store = await LocalCommsStore.openSqlite(path);
 
-  store.heartbeat({
+  await store.heartbeat({
     id: "codex",
     name: "Codex",
     workspace: "repo-a",
     status: "working",
     currentTaskId: "task-1",
   });
-  store.heartbeat({ id: "claude", name: "Claude", workspace: "repo-b" });
+  await store.heartbeat({ id: "claude", name: "Claude", workspace: "repo-b" });
 
-  store.sendMessage({
+  await store.sendMessage({
     senderId: "codex",
     workspace: "repo-a",
     channel: "handoffs",
     body: "repo-a only",
   });
 
-  expect(store.whoIsOnline("repo-a").map((item) => item.id)).toEqual(["codex"]);
-  expect(store.getAgent("codex")?.status).toBe("working");
-  expect(store.inbox("claude", { workspace: "repo-b", channel: "handoffs" })).toHaveLength(0);
-  expect(store.inbox("claude", { workspace: "repo-a", channel: "handoffs" })).toHaveLength(1);
+  expect((await store.whoIsOnline("repo-a")).map((item) => item.id)).toEqual(["codex"]);
+  expect((await store.getAgent("codex"))?.status).toBe("working");
+  expect(await store.inbox("claude", { workspace: "repo-b", channel: "handoffs" })).toHaveLength(0);
+  expect(await store.inbox("claude", { workspace: "repo-a", channel: "handoffs" })).toHaveLength(1);
 
-  store.close();
+  await store.close();
 });
 
-test("same agent id keeps separate presence in each workspace", () => {
+test("same agent id keeps separate presence in each workspace", async () => {
   const { path } = tempDb();
-  const store = new LocalCommsStore(path);
+  const store = await LocalCommsStore.openSqlite(path);
 
-  store.heartbeat({
+  await store.heartbeat({
     id: "codex",
     name: "Codex A",
     workspace: "repo-a",
     status: "working",
     currentTaskId: "task-a",
   });
-  store.heartbeat({
+  await store.heartbeat({
     id: "codex",
     name: "Codex B",
     workspace: "repo-b",
@@ -166,17 +166,17 @@ test("same agent id keeps separate presence in each workspace", () => {
     currentTaskId: "task-b",
   });
 
-  expect(store.getAgent("codex", "repo-a")?.status).toBe("working");
-  expect(store.getAgent("codex", "repo-a")?.current_task_id).toBe("task-a");
-  expect(store.getAgent("codex", "repo-b")?.status).toBe("available");
-  expect(store.getAgent("codex", "repo-b")?.current_task_id).toBe("task-b");
-  expect(store.listAgents("repo-a").map((agent) => agent.name)).toEqual(["Codex A"]);
-  expect(store.listAgents("repo-b").map((agent) => agent.name)).toEqual(["Codex B"]);
+  expect((await store.getAgent("codex", "repo-a"))?.status).toBe("working");
+  expect((await store.getAgent("codex", "repo-a"))?.current_task_id).toBe("task-a");
+  expect((await store.getAgent("codex", "repo-b"))?.status).toBe("available");
+  expect((await store.getAgent("codex", "repo-b"))?.current_task_id).toBe("task-b");
+  expect((await store.listAgents("repo-a")).map((agent) => agent.name)).toEqual(["Codex A"]);
+  expect((await store.listAgents("repo-b")).map((agent) => agent.name)).toEqual(["Codex B"]);
 
-  store.close();
+  await store.close();
 });
 
-test("migration upgrades legacy agent primary key and task dependency foreign keys", () => {
+test("migration upgrades legacy agent primary key and task dependency foreign keys", async () => {
   const { path } = tempDb();
   const now = new Date().toISOString();
   const db = new Database(path);
@@ -230,12 +230,12 @@ test("migration upgrades legacy agent primary key and task dependency foreign ke
   `);
   db.close();
 
-  const store = new LocalCommsStore(path);
-  expect(store.getAgent("codex", "repo-a")?.current_task_id).toBe("task-1");
+  const store = await LocalCommsStore.openSqlite(path);
+  expect((await store.getAgent("codex", "repo-a"))?.current_task_id).toBe("task-1");
   expect(
-    store.listTasks("codex", { workspace: "repo-a", parentTaskId: undefined }).map((task) => task.id),
+    (await store.listTasks("codex", { workspace: "repo-a", parentTaskId: undefined })).map((task) => task.id),
   ).toContain("child");
-  store.close();
+  await store.close();
 
   const migrated = new Database(path);
   const agentColumns = migrated
@@ -260,24 +260,24 @@ test("migration upgrades legacy agent primary key and task dependency foreign ke
   expect(dependencies.map((dependency) => dependency.depends_on_task_id)).toEqual(["parent"]);
 });
 
-test("threads, replies, and message artifacts are preserved", () => {
+test("threads, replies, and message artifacts are preserved", async () => {
   const { path } = tempDb();
-  const store = new LocalCommsStore(path);
+  const store = await LocalCommsStore.openSqlite(path);
 
-  const first = store.sendMessage({
+  const first = await store.sendMessage({
     senderId: "codex",
     recipientId: "claude",
     body: "Please review src/store.ts",
     artifacts: [{ type: "file", path: "/tmp/src/store.ts", line: 12, label: "store" }],
   });
-  const reply = store.replyMessage({
+  const reply = await store.replyMessage({
     senderId: "claude",
     messageId: first.id,
     body: "I will check it.",
   });
 
-  const threads = store.listThreads("claude");
-  const messages = store.getThread("claude", first.thread_id);
+  const threads = await store.listThreads("claude");
+  const messages = await store.getThread("claude", first.thread_id);
 
   expect(reply.thread_id).toBe(first.thread_id);
   expect(threads[0]?.thread_id).toBe(first.thread_id);
@@ -287,18 +287,18 @@ test("threads, replies, and message artifacts are preserved", () => {
   ]);
   expect(messages[0]?.artifacts[0]?.path).toBe("/tmp/src/store.ts");
 
-  store.close();
+  await store.close();
 });
 
-test("tasks support dependencies, priority, due dates, blocked reasons, and artifacts", () => {
+test("tasks support dependencies, priority, due dates, blocked reasons, and artifacts", async () => {
   const { path } = tempDb();
-  const store = new LocalCommsStore(path);
+  const store = await LocalCommsStore.openSqlite(path);
 
-  const parent = store.createTask({
+  const parent = await store.createTask({
     creatorId: "codex",
     title: "Parent",
   });
-  const child = store.createTask({
+  const child = await store.createTask({
     creatorId: "codex",
     title: "Child",
     priority: 10,
@@ -308,7 +308,7 @@ test("tasks support dependencies, priority, due dates, blocked reasons, and arti
     artifacts: [{ type: "url", url: "https://example.com/spec", label: "spec" }],
   });
 
-  const blocked = store.updateTask({
+  const blocked = await store.updateTask({
     agentId: "claude",
     taskId: child.id,
     status: "blocked",
@@ -319,48 +319,48 @@ test("tasks support dependencies, priority, due dates, blocked reasons, and arti
   expect(child.priority).toBe(10);
   expect(child.artifacts[0]?.url).toBe("https://example.com/spec");
   expect(blocked.blocked_reason).toBe("Waiting on parent.");
-  expect(store.listTasks("codex", { parentTaskId: parent.id }).map((task) => task.id)).toEqual([
+  expect((await store.listTasks("codex", { parentTaskId: parent.id })).map((task) => task.id)).toEqual([
     child.id,
   ]);
 
-  store.close();
+  await store.close();
 });
 
-test("notes, channel summaries, and update watching expose shared memory", () => {
+test("notes, channel summaries, and update watching expose shared memory", async () => {
   const { path } = tempDb();
-  const store = new LocalCommsStore(path);
+  const store = await LocalCommsStore.openSqlite(path);
   const since = new Date(Date.now() - 1000).toISOString();
 
-  store.sendMessage({
+  await store.sendMessage({
     senderId: "codex",
     channel: "docs",
     body: "Docs update.",
   });
-  const note = store.writeNote({
+  const note = await store.writeNote({
     agentId: "codex",
     channel: "docs",
     title: "Docs context",
     body: "README examples need to stay current.",
     pinned: true,
   });
-  const unpinned = store.pinNote(note.id, false);
-  const summary = store.summarizeChannel("claude", undefined, "docs");
-  const updates = store.updatesSince("claude", undefined, since);
+  const unpinned = await store.pinNote(note.id, false);
+  const summary = await store.summarizeChannel("claude", undefined, "docs");
+  const updates = await store.updatesSince("claude", undefined, since);
 
   expect(unpinned.pinned).toBe(false);
-  expect(store.readNotes({ channel: "docs", query: "README" })[0]?.id).toBe(note.id);
+  expect((await store.readNotes({ channel: "docs", query: "README" }))[0]?.id).toBe(note.id);
   expect(JSON.stringify(summary)).toContain("Docs update.");
   expect(updates.messages.length).toBeGreaterThan(0);
   expect(updates.notes.length).toBeGreaterThan(0);
 
-  store.close();
+  await store.close();
 });
 
-test("notes cannot be overwritten or pinned across workspaces", () => {
+test("notes cannot be overwritten or pinned across workspaces", async () => {
   const { path } = tempDb();
-  const store = new LocalCommsStore(path);
+  const store = await LocalCommsStore.openSqlite(path);
 
-  const note = store.writeNote({
+  const note = await store.writeNote({
     agentId: "codex",
     workspace: "repo-a",
     noteId: "shared-note",
@@ -368,7 +368,7 @@ test("notes cannot be overwritten or pinned across workspaces", () => {
     body: "Repo A context.",
   });
 
-  expect(() =>
+  await expect(
     store.writeNote({
       agentId: "claude",
       workspace: "repo-b",
@@ -376,52 +376,52 @@ test("notes cannot be overwritten or pinned across workspaces", () => {
       title: "Repo B",
       body: "Attempted overwrite.",
     }),
-  ).toThrow(/not in workspace 'repo-b'/);
-  expect(() => store.pinNote(note.id, true, "repo-b")).toThrow(/not in workspace 'repo-b'/);
-  expect(store.pinNote(note.id, true, "repo-a").pinned).toBe(true);
-  expect(store.readNotes({ workspace: "repo-a" })[0]?.title).toBe("Repo A");
-  expect(store.readNotes({ workspace: "repo-b" })).toHaveLength(0);
+  ).rejects.toThrow(/not in workspace 'repo-b'/);
+  await expect(store.pinNote(note.id, true, "repo-b")).rejects.toThrow(/not in workspace 'repo-b'/);
+  expect((await store.pinNote(note.id, true, "repo-a")).pinned).toBe(true);
+  expect((await store.readNotes({ workspace: "repo-a" }))[0]?.title).toBe("Repo A");
+  expect(await store.readNotes({ workspace: "repo-b" })).toHaveLength(0);
 
-  store.close();
+  await store.close();
 });
 
-test("watch updates only returns task events visible to the requesting agent", () => {
+test("watch updates only returns task events visible to the requesting agent", async () => {
   const { path } = tempDb();
-  const store = new LocalCommsStore(path);
+  const store = await LocalCommsStore.openSqlite(path);
   const since = new Date(Date.now() - 1000).toISOString();
 
-  const task = store.createTask({
+  const task = await store.createTask({
     creatorId: "codex",
     workspace: "repo-a",
     title: "Private task",
     assigneeId: "claude",
   });
-  store.updateTask({
+  await store.updateTask({
     agentId: "claude",
     workspace: "repo-a",
     taskId: task.id,
     status: "done",
   });
 
-  expect(store.updatesSince("cursor", "repo-a", since).task_events).toHaveLength(0);
-  expect(store.updatesSince("codex", "repo-a", since).task_events.length).toBeGreaterThan(0);
-  expect(store.updatesSince("claude", "repo-a", since).task_events.length).toBeGreaterThan(0);
+  expect((await store.updatesSince("cursor", "repo-a", since)).task_events).toHaveLength(0);
+  expect((await store.updatesSince("codex", "repo-a", since)).task_events.length).toBeGreaterThan(0);
+  expect((await store.updatesSince("claude", "repo-a", since)).task_events.length).toBeGreaterThan(0);
 
-  store.close();
+  await store.close();
 });
 
-test("task updates and artifacts require owner visibility", () => {
+test("task updates and artifacts require owner visibility", async () => {
   const { path } = tempDb();
-  const store = new LocalCommsStore(path);
+  const store = await LocalCommsStore.openSqlite(path);
 
-  const message = store.sendMessage({
+  const message = await store.sendMessage({
     senderId: "codex",
     workspace: "repo-a",
     recipientId: "claude",
     body: "Private message.",
     artifacts: [{ type: "file", path: "/tmp/private.ts" }],
   });
-  const task = store.createTask({
+  const task = await store.createTask({
     creatorId: "codex",
     workspace: "repo-a",
     title: "Private task",
@@ -429,40 +429,40 @@ test("task updates and artifacts require owner visibility", () => {
     artifacts: [{ type: "url", url: "https://example.com/private" }],
   });
 
-  expect(store.listVisibleArtifacts("claude", "repo-a", "message", message.id)[0]?.path).toBe(
+  expect((await store.listVisibleArtifacts("claude", "repo-a", "message", message.id))[0]?.path).toBe(
     "/tmp/private.ts",
   );
-  expect(store.listVisibleArtifacts("claude", "repo-a", "task", task.id)[0]?.url).toBe(
+  expect((await store.listVisibleArtifacts("claude", "repo-a", "task", task.id))[0]?.url).toBe(
     "https://example.com/private",
   );
-  expect(() => store.listVisibleArtifacts("cursor", "repo-a", "message", message.id)).toThrow(
+  await expect(store.listVisibleArtifacts("cursor", "repo-a", "message", message.id)).rejects.toThrow(
     /not visible/,
   );
-  expect(() => store.listVisibleArtifacts("cursor", "repo-a", "task", task.id)).toThrow(
+  await expect(store.listVisibleArtifacts("cursor", "repo-a", "task", task.id)).rejects.toThrow(
     /not visible/,
   );
-  expect(() =>
+  await expect(
     store.updateTask({
       agentId: "cursor",
       workspace: "repo-a",
       taskId: task.id,
       status: "done",
     }),
-  ).toThrow(/not visible/);
+  ).rejects.toThrow(/not visible/);
 
-  store.close();
+  await store.close();
 });
 
-test("locks enforce workspace-scoped leases", () => {
+test("locks enforce workspace-scoped leases", async () => {
   const { path } = tempDb();
-  const store = new LocalCommsStore(path);
+  const store = await LocalCommsStore.openSqlite(path);
 
-  const lock = store.acquireLock({
+  const lock = await store.acquireLock({
     agentId: "codex",
     resource: "src/store.ts",
     purpose: "editing",
   });
-  const renewed = store.acquireLock({
+  const renewed = await store.acquireLock({
     agentId: "codex",
     resource: "src/store.ts",
     purpose: "still editing",
@@ -470,24 +470,24 @@ test("locks enforce workspace-scoped leases", () => {
 
   expect(lock.owner_agent_id).toBe("codex");
   expect(renewed.purpose).toBe("still editing");
-  expect(() =>
+  await expect(
     store.acquireLock({
       agentId: "claude",
       resource: "src/store.ts",
     }),
-  ).toThrow(/locked by 'codex'/);
+  ).rejects.toThrow(/locked by 'codex'/);
 
-  store.releaseLock("codex", "src/store.ts");
-  expect(store.listLocks()).toHaveLength(0);
+  await store.releaseLock("codex", "src/store.ts");
+  expect(await store.listLocks()).toHaveLength(0);
 
-  store.close();
+  await store.close();
 });
 
-test("access keys authenticate by token and can be revoked", () => {
+test("access keys authenticate by token and can be revoked", async () => {
   const { path } = tempDb();
-  const store = new LocalCommsStore(path);
+  const store = await LocalCommsStore.openSqlite(path);
 
-  const created = store.createAccessKey({
+  const created = await store.createAccessKey({
     name: "Codex HTTP",
     agentId: "codex",
     agentName: "Codex",
@@ -497,31 +497,31 @@ test("access keys authenticate by token and can be revoked", () => {
 
   expect(created.token).toBe("known-token");
   expect(created.key.token_prefix).toContain("...");
-  expect(store.listAccessKeys()[0]?.token_prefix).toBe(created.key.token_prefix);
+  expect((await store.listAccessKeys())[0]?.token_prefix).toBe(created.key.token_prefix);
 
-  const authenticated = store.authenticateAccessToken("known-token");
+  const authenticated = await store.authenticateAccessToken("known-token");
   expect(authenticated?.agent_id).toBe("codex");
   expect(authenticated?.workspace).toBe("mcp");
   expect(authenticated?.last_used_at).toBeString();
-  expect(store.authenticateAccessToken("wrong-token")).toBeNull();
+  expect(await store.authenticateAccessToken("wrong-token")).toBeNull();
 
-  const revoked = store.revokeAccessKey(created.key.id);
+  const revoked = await store.revokeAccessKey(created.key.id);
   expect(revoked.enabled).toBe(false);
-  expect(store.authenticateAccessToken("known-token")).toBeNull();
+  expect(await store.authenticateAccessToken("known-token")).toBeNull();
 
-  store.close();
+  await store.close();
 });
 
-test("stale claimed tasks are visible for reclamation checks", () => {
+test("stale claimed tasks are visible for reclamation checks", async () => {
   const { path } = tempDb();
-  const store = new LocalCommsStore(path);
-  const task = store.createTask({
+  const store = await LocalCommsStore.openSqlite(path);
+  const task = await store.createTask({
     creatorId: "codex",
     title: "Possibly abandoned task",
   });
 
-  store.claimTask("claude", task.id, "Starting.");
-  expect(store.listTasks("codex", { staleAfterSeconds: 3_600 }).map((item) => item.id)).not.toContain(
+  await store.claimTask("claude", task.id, "Starting.");
+  expect((await store.listTasks("codex", { staleAfterSeconds: 3_600 })).map((item) => item.id)).not.toContain(
     task.id,
   );
 
@@ -532,27 +532,61 @@ test("stale claimed tasks are visible for reclamation checks", () => {
   );
   db.close();
 
-  expect(store.listTasks("codex", { staleAfterSeconds: 3_600 }).map((item) => item.id)).toContain(
+  expect((await store.listTasks("codex", { staleAfterSeconds: 3_600 })).map((item) => item.id)).toContain(
     task.id,
   );
 
-  store.close();
+  await store.close();
 });
 
-test("claim_task respects workspace scope when provided", () => {
+test("claim_task respects workspace scope when provided", async () => {
   const { path } = tempDb();
-  const store = new LocalCommsStore(path);
-  const task = store.createTask({
+  const store = await LocalCommsStore.openSqlite(path);
+  const task = await store.createTask({
     creatorId: "codex",
     workspace: "repo-a",
     title: "Repo A task",
   });
 
-  expect(() => store.claimTask("claude", task.id, undefined, "repo-b")).toThrow(/not in workspace/);
-  expect(store.claimTask("claude", task.id, undefined, "repo-a").assignee_id).toBe("claude");
+  await expect(store.claimTask("claude", task.id, undefined, "repo-b")).rejects.toThrow(/not in workspace/);
+  expect((await store.claimTask("claude", task.id, undefined, "repo-a")).assignee_id).toBe("claude");
 
-  store.close();
+  await store.close();
 });
+
+test.skipIf(!process.env.AGENT_MAILBOX_TEST_DATABASE_URL)(
+  "postgres store supports core mailbox operations",
+  async () => {
+    const store = await LocalCommsStore.openPostgres(process.env.AGENT_MAILBOX_TEST_DATABASE_URL!);
+    const workspace = `pg-${crypto.randomUUID()}`;
+    try {
+      await store.registerAgent({ id: "codex", name: "Codex", workspace });
+      const message = await store.sendMessage({
+        senderId: "codex",
+        workspace,
+        channel: "handoffs",
+        body: "Postgres integration message.",
+      });
+      const task = await store.createTask({
+        creatorId: "codex",
+        workspace,
+        title: "Postgres integration task",
+      });
+      const note = await store.writeNote({
+        agentId: "codex",
+        workspace,
+        title: "Postgres note",
+        body: "Postgres-backed note.",
+      });
+
+      expect((await store.inbox("claude", { workspace })).map((item) => item.id)).toContain(message.id);
+      expect((await store.claimTask("claude", task.id, undefined, workspace)).status).toBe("claimed");
+      expect((await store.readNotes({ workspace }))[0]?.id).toBe(note.id);
+    } finally {
+      await store.close();
+    }
+  },
+);
 
 function tempDb(): { dir: string; path: string } {
   const dir = mkdtempSync(join(tmpdir(), "agent-mailbox-"));

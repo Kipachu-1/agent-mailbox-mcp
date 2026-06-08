@@ -29,7 +29,7 @@ afterEach(async () => {
 test(
   "streamable HTTP server manages keys and shares mailbox state",
   async () => {
-    const server = startTestServer();
+    const server = await startTestServer();
 
     const health = await fetch(`http://${server.host}:${server.port}/health`);
     expect(health.status).toBe(200);
@@ -338,7 +338,7 @@ test(
 );
 
 test("streamable HTTP rejects missing and mismatched bearer tokens", async () => {
-  const server = startTestServer();
+  const server = await startTestServer();
   const agentAKey = await createAccessKey(server, {
     name: "Agent A token",
     agent_id: "agent-a",
@@ -388,7 +388,7 @@ test("streamable HTTP rejects missing and mismatched bearer tokens", async () =>
 });
 
 test("streamable HTTP can bootstrap access keys from environment-compatible config", async () => {
-  const server = startTestServer([
+  const server = await startTestServer([
     {
       token: "bootstrap-token",
       agent: {
@@ -412,18 +412,21 @@ test("streamable HTTP can bootstrap access keys from environment-compatible conf
   }
 });
 
-function startTestServer(tokens: HttpAgentTokenConfig[] = []): AgentMailboxHttpServer {
+async function startTestServer(tokens: HttpAgentTokenConfig[] = []): Promise<AgentMailboxHttpServer> {
   const dir = mkdtempSync(join(tmpdir(), "agent-mailbox-http-"));
   tempDirs.push(dir);
   let lastError: unknown;
   for (let attempt = 0; attempt < 20; attempt += 1) {
     try {
-      const server = startAgentMailboxHttpServer({
+      const dbPath = join(dir, "mailbox.sqlite");
+      const server = await startAgentMailboxHttpServer({
         adminToken,
         host: "127.0.0.1",
         port: randomPort(),
         path: "/mcp",
-        dbPath: join(dir, "mailbox.sqlite"),
+        dbPath,
+        database: { kind: "sqlite", path: dbPath },
+        s3: null,
         tokens,
       });
       servers.push(server);

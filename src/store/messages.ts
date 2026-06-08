@@ -1,7 +1,12 @@
-import type { SQLQueryBindings } from "bun:sqlite";
 import { insertArtifacts, listArtifacts } from "./artifacts";
-import { visibleMessageClause } from "./context";
-import type { StoreContext } from "./context";
+import {
+  caseInsensitiveLike,
+  doNothingOnConflict,
+  insertOrIgnore,
+  visibleMessageClause,
+  type StoreContext,
+  type StoreValue,
+} from "./context";
 import { emptyToNull, encodeJson, isoNow, limit, mapMessage, type MessageRow, type ThreadRow } from "./mappers";
 import type {
   InboxOptions,
@@ -12,7 +17,7 @@ import type {
   ThreadRecord,
 } from "./types";
 
-export function sendMessage(ctx: StoreContext, input: SendMessageInput): MessageRecord {
+export async function sendMessage(ctx: StoreContext, input: SendMessageInput): Promise<MessageRecord> {
   const workspace = input.workspace?.trim() || "default";
   const recipientId = emptyToNull(input.recipientId);
   const channel = emptyToNull(input.channel);
@@ -23,16 +28,15 @@ export function sendMessage(ctx: StoreContext, input: SendMessageInput): Message
   const now = isoNow();
   const id = crypto.randomUUID();
   const reply = input.replyToMessageId
-    ? getMessageForAgent(ctx, input.senderId, input.replyToMessageId, workspace)
+    ? await getMessageForAgent(ctx, input.senderId, input.replyToMessageId, workspace)
     : null;
   if (input.replyToMessageId && !reply) {
     throw new Error(`Message '${input.replyToMessageId}' is not visible for replies.`);
   }
   const threadId = input.threadId?.trim() || reply?.thread_id || id;
 
-  ctx.exec("BEGIN IMMEDIATE");
-  try {
-    ctx.run(
+  await ctx.transaction(async (tx) => {
+    await tx.run(
       `INSERT INTO messages
          (id, workspace, kind, thread_id, reply_to_message_id, sender_id, recipient_id, channel, body, metadata, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -50,23 +54,19 @@ export function sendMessage(ctx: StoreContext, input: SendMessageInput): Message
         now,
       ],
     );
-    insertArtifacts(ctx, "message", id, input.artifacts ?? []);
-    ctx.exec("COMMIT");
-  } catch (error) {
-    ctx.exec("ROLLBACK");
-    throw error;
-  }
+    await insertArtifacts(tx, "message", id, input.artifacts ?? []);
+  });
 
-  const message = getMessageForAgent(ctx, input.senderId, id, workspace);
+  const message = await getMessageForAgent(ctx, input.senderId, id, workspace);
   if (!message) {
     throw new Error(`Failed to create message '${id}'.`);
   }
   return message;
 }
 
-export function replyMessage(ctx: StoreContext, input: ReplyMessageInput): MessageRecord {
+export async function replyMessage(ctx: StoreContext, input: ReplyMessageInput): Promise<MessageRecord> {
   const workspace = input.workspace?.trim() || "default";
-  const original = getMessageForAgent(ctx, input.senderId, input.messageId, workspace);
+  const original = await getMessageForAgent(ctx, input.senderId, input.messageId, workspace);
   if (!original) {
     throw new Error(`Message '${input.messageId}' is not visible to agent '${input.senderId}'.`);
   }
@@ -102,10 +102,14 @@ export function replyMessage(ctx: StoreContext, input: ReplyMessageInput): Messa
   });
 }
 
-export function inbox(ctx: StoreContext, agentId: string, options: InboxOptions = {}): MessageRecord[] {
+export async function inbox(
+  ctx: StoreContext,
+  agentId: string,
+  options: InboxOptions = {},
+): Promise<MessageRecord[]> {
   const workspace = options.workspace?.trim() || "default";
   const clauses = [visibleMessageClause(options.includeSent !== false)];
-  const params: SQLQueryBindings[] = [agentId, workspace, agentId];
+  const params: StoreValue[] = [agentId, workspace, agentId];
 
   if (options.includeSent !== false) {
     params.push(agentId);
@@ -124,7 +128,7 @@ export function inbox(ctx: StoreContext, agentId: string, options: InboxOptions 
   }
 
   params.push(limit(options.limit));
-  return ctx.all<MessageRow>(
+  const rows = await ctx.all<MessageRow>(
     `SELECT m.*, r.read_at
      FROM messages m
      LEFT JOIN message_reads r ON r.message_id = m.id AND r.agent_id = ?
@@ -132,43 +136,44 @@ export function inbox(ctx: StoreContext, agentId: string, options: InboxOptions 
      ORDER BY m.created_at DESC
      LIMIT ?`,
     params,
-  ).map((row) => messageWithRelations(ctx, row, agentId));
+  );
+  return Promise.all(rows.map((row) => messageWithRelations(ctx, row, agentId)));
 }
 
-export function readMessage(
+export async function readMessage(
   ctx: StoreContext,
   agentId: string,
   messageId: string,
   workspace?: string,
-): MessageRecord {
+): Promise<MessageRecord> {
   const scope = workspace?.trim() || "default";
-  const message = getMessageForAgent(ctx, agentId, messageId, scope);
+  const message = await getMessageForAgent(ctx, agentId, messageId, scope);
   if (!message) {
     throw new Error(`Message '${messageId}' is not visible to agent '${agentId}'.`);
   }
 
   const now = isoNow();
-  ctx.run(
-    `INSERT OR IGNORE INTO message_reads (message_id, agent_id, read_at)
-     VALUES (?, ?, ?)`,
+  await ctx.run(
+    `${insertOrIgnore(ctx)} message_reads (message_id, agent_id, read_at)
+     VALUES (?, ?, ?) ${doNothingOnConflict(ctx)}`,
     [messageId, agentId, now],
   );
 
-  const readMessage = getMessageForAgent(ctx, agentId, messageId, scope);
+  const readMessage = await getMessageForAgent(ctx, agentId, messageId, scope);
   if (!readMessage) {
     throw new Error(`Message '${messageId}' disappeared after reading.`);
   }
   return readMessage;
 }
 
-export function searchMessages(
+export async function searchMessages(
   ctx: StoreContext,
   agentId: string,
   options: SearchMessagesOptions,
-): MessageRecord[] {
+): Promise<MessageRecord[]> {
   const workspace = options.workspace?.trim() || "default";
-  const clauses = [visibleMessageClause(true), "m.body LIKE ? COLLATE NOCASE"];
-  const params: SQLQueryBindings[] = [agentId, workspace, agentId, agentId, `%${options.query}%`];
+  const clauses = [visibleMessageClause(true), caseInsensitiveLike(ctx, "m.body")];
+  const params: StoreValue[] = [agentId, workspace, agentId, agentId, `%${options.query}%`];
 
   if (options.channel) {
     clauses.push("m.channel = ?");
@@ -176,7 +181,7 @@ export function searchMessages(
   }
 
   params.push(limit(options.limit));
-  return ctx.all<MessageRow>(
+  const rows = await ctx.all<MessageRow>(
     `SELECT m.*, r.read_at
      FROM messages m
      LEFT JOIN message_reads r ON r.message_id = m.id AND r.agent_id = ?
@@ -184,17 +189,18 @@ export function searchMessages(
      ORDER BY m.created_at DESC
      LIMIT ?`,
     params,
-  ).map((row) => messageWithRelations(ctx, row, agentId));
+  );
+  return Promise.all(rows.map((row) => messageWithRelations(ctx, row, agentId)));
 }
 
-export function listThreads(
+export async function listThreads(
   ctx: StoreContext,
   agentId: string,
   workspace?: string,
   limitValue?: number,
-): ThreadRecord[] {
+): Promise<ThreadRecord[]> {
   const scope = workspace?.trim() || "default";
-  return ctx.all<ThreadRow>(
+  return (await ctx.all<ThreadRow>(
     `SELECT
        m.thread_id,
        m.workspace,
@@ -212,35 +218,36 @@ export function listThreads(
      ORDER BY last_message_at DESC
      LIMIT ?`,
     [scope, agentId, agentId, limit(limitValue)],
-  ).map((row) => ({ ...row, message_count: Number(row.message_count) }));
+  )).map((row) => ({ ...row, message_count: Number(row.message_count) }));
 }
 
-export function getThread(
+export async function getThread(
   ctx: StoreContext,
   agentId: string,
   threadId: string,
   workspace?: string,
   limitValue?: number,
-): MessageRecord[] {
+): Promise<MessageRecord[]> {
   const scope = workspace?.trim() || "default";
-  return ctx.all<MessageRow>(
+  const rows = await ctx.all<MessageRow>(
     `SELECT m.*, r.read_at
      FROM messages m
      LEFT JOIN message_reads r ON r.message_id = m.id AND r.agent_id = ?
      WHERE ${visibleMessageClause(true)} AND m.thread_id = ?
-     ORDER BY m.created_at ASC, m.rowid ASC
+     ORDER BY m.created_at ASC, m.id ASC
      LIMIT ?`,
     [agentId, scope, agentId, agentId, threadId, limit(limitValue)],
-  ).map((row) => messageWithRelations(ctx, row, agentId));
+  );
+  return Promise.all(rows.map((row) => messageWithRelations(ctx, row, agentId)));
 }
 
-export function getMessageForAgent(
+export async function getMessageForAgent(
   ctx: StoreContext,
   agentId: string,
   messageId: string,
   workspace: string,
-): MessageRecord | null {
-  const row = ctx.get<MessageRow>(
+): Promise<MessageRecord | null> {
+  const row = await ctx.get<MessageRow>(
     `SELECT m.*, r.read_at
      FROM messages m
      LEFT JOIN message_reads r ON r.message_id = m.id AND r.agent_id = ?
@@ -250,13 +257,13 @@ export function getMessageForAgent(
   return row ? messageWithRelations(ctx, row, agentId) : null;
 }
 
-export function messageWithRelations(
+export async function messageWithRelations(
   ctx: Pick<StoreContext, "all">,
   row: MessageRow,
   agentId: string,
-): MessageRecord {
+): Promise<MessageRecord> {
   return {
     ...mapMessage(row, agentId),
-    artifacts: listArtifacts(ctx, "message", row.id),
+    artifacts: await listArtifacts(ctx, "message", row.id),
   };
 }

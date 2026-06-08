@@ -1,6 +1,5 @@
-import type { SQLQueryBindings } from "bun:sqlite";
 import { listArtifacts, replaceArtifacts } from "./artifacts";
-import type { StoreContext } from "./context";
+import { caseInsensitiveLike, type StoreContext, type StoreValue } from "./context";
 import {
   emptyToNull,
   encodeJson,
@@ -14,17 +13,16 @@ import { inbox } from "./messages";
 import { listTasks } from "./tasks";
 import type { NoteRecord, ReadNotesOptions, WriteNoteInput } from "./types";
 
-export function writeNote(ctx: StoreContext, input: WriteNoteInput): NoteRecord {
+export async function writeNote(ctx: StoreContext, input: WriteNoteInput): Promise<NoteRecord> {
   const workspace = workspaceOf(input.workspace);
   const now = isoNow();
   const id = input.noteId?.trim() || crypto.randomUUID();
-  const existing = input.noteId ? getNote(ctx, id) : null;
+  const existing = input.noteId ? await getNote(ctx, id) : null;
   if (existing && existing.workspace !== workspace) {
     throw new Error(`Note '${id}' is not in workspace '${workspace}'.`);
   }
-  ctx.exec("BEGIN IMMEDIATE");
-  try {
-    ctx.run(
+  await ctx.transaction(async (tx) => {
+    await tx.run(
       `INSERT INTO notes
          (id, workspace, channel, title, body, pinned, creator_id, metadata, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -49,24 +47,23 @@ export function writeNote(ctx: StoreContext, input: WriteNoteInput): NoteRecord 
         now,
       ],
     );
-    replaceArtifacts(ctx, "note", id, input.artifacts ?? []);
-    ctx.exec("COMMIT");
-  } catch (error) {
-    ctx.exec("ROLLBACK");
-    throw error;
-  }
+    await replaceArtifacts(tx, "note", id, input.artifacts ?? []);
+  });
 
-  const note = getNote(ctx, id);
+  const note = await getNote(ctx, id);
   if (!note) {
     throw new Error(`Failed to write note '${id}'.`);
   }
   return note;
 }
 
-export function readNotes(ctx: StoreContext, options: ReadNotesOptions = {}): NoteRecord[] {
+export async function readNotes(
+  ctx: StoreContext,
+  options: ReadNotesOptions = {},
+): Promise<NoteRecord[]> {
   const workspace = workspaceOf(options.workspace);
   const clauses = ["workspace = ?"];
-  const params: SQLQueryBindings[] = [workspace];
+  const params: StoreValue[] = [workspace];
 
   if (options.channel) {
     clauses.push("channel = ?");
@@ -76,77 +73,81 @@ export function readNotes(ctx: StoreContext, options: ReadNotesOptions = {}): No
     clauses.push("pinned = 1");
   }
   if (options.query) {
-    clauses.push("(title LIKE ? COLLATE NOCASE OR body LIKE ? COLLATE NOCASE)");
+    clauses.push(`(${caseInsensitiveLike(ctx, "title")} OR ${caseInsensitiveLike(ctx, "body")})`);
     params.push(`%${options.query}%`, `%${options.query}%`);
   }
 
   params.push(limit(options.limit));
-  return ctx.all<NoteRow>(
+  const rows = await ctx.all<NoteRow>(
     `SELECT * FROM notes
      WHERE ${clauses.join(" AND ")}
      ORDER BY pinned DESC, updated_at DESC
      LIMIT ?`,
     params,
-  ).map((row) => noteWithRelations(ctx, row));
+  );
+  return Promise.all(rows.map((row) => noteWithRelations(ctx, row)));
 }
 
-export function listAllNotes(
+export async function listAllNotes(
   ctx: StoreContext,
   options: Omit<ReadNotesOptions, "workspace" | "channel" | "query"> = {},
-): NoteRecord[] {
+): Promise<NoteRecord[]> {
   const clauses: string[] = [];
-  const params: SQLQueryBindings[] = [];
+  const params: StoreValue[] = [];
   if (options.pinnedOnly) {
     clauses.push("pinned = 1");
   }
 
   const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
   params.push(limit(options.limit));
-  return ctx.all<NoteRow>(
+  const rows = await ctx.all<NoteRow>(
     `SELECT * FROM notes
      ${where}
      ORDER BY pinned DESC, updated_at DESC
      LIMIT ?`,
     params,
-  ).map((row) => noteWithRelations(ctx, row));
+  );
+  return Promise.all(rows.map((row) => noteWithRelations(ctx, row)));
 }
 
-export function pinNote(
+export async function pinNote(
   ctx: StoreContext,
   noteId: string,
   pinned: boolean,
   workspace?: string,
-): NoteRecord {
+): Promise<NoteRecord> {
   const scope = workspaceOf(workspace);
-  const existing = getNote(ctx, noteId);
+  const existing = await getNote(ctx, noteId);
   if (!existing) {
     throw new Error(`Note '${noteId}' does not exist.`);
   }
   if (existing.workspace !== scope) {
     throw new Error(`Note '${noteId}' is not in workspace '${scope}'.`);
   }
-  ctx.run(`UPDATE notes SET pinned = ?, updated_at = ? WHERE id = ?`, [
+  await ctx.run(`UPDATE notes SET pinned = ?, updated_at = ? WHERE id = ?`, [
     pinned ? 1 : 0,
     isoNow(),
     noteId,
   ]);
-  const note = getNote(ctx, noteId);
+  const note = await getNote(ctx, noteId);
   if (!note) {
     throw new Error(`Note '${noteId}' does not exist.`);
   }
   return note;
 }
 
-export function summarizeChannel(
+export async function summarizeChannel(
   ctx: StoreContext,
   agentId: string,
   workspace?: string,
   channel?: string,
-): Record<string, unknown> {
+): Promise<Record<string, unknown>> {
   const scope = workspaceOf(workspace);
-  const messages = inbox(ctx, agentId, { workspace: scope, channel, includeSent: true, limit: 20 });
-  const tasks = listTasks(ctx, agentId, { workspace: scope, channel, limit: 20 });
-  const notes = readNotes(ctx, { workspace: scope, channel, limit: 20 });
+  const [messages, tasks, notes] = await Promise.all([
+    inbox(ctx, agentId, { workspace: scope, channel, includeSent: true, limit: 20 }),
+    listTasks(ctx, agentId, { workspace: scope, channel, limit: 20 }),
+    readNotes(ctx, { workspace: scope, channel, limit: 20 }),
+  ]);
   return {
     workspace: scope,
     channel: channel ?? null,
@@ -159,14 +160,17 @@ export function summarizeChannel(
   };
 }
 
-export function getNote(ctx: StoreContext, noteId: string): NoteRecord | null {
-  const row = ctx.get<NoteRow>(`SELECT * FROM notes WHERE id = ?`, [noteId]);
+export async function getNote(ctx: StoreContext, noteId: string): Promise<NoteRecord | null> {
+  const row = await ctx.get<NoteRow>(`SELECT * FROM notes WHERE id = ?`, [noteId]);
   return row ? noteWithRelations(ctx, row) : null;
 }
 
-export function noteWithRelations(ctx: Pick<StoreContext, "all">, row: NoteRow): NoteRecord {
+export async function noteWithRelations(
+  ctx: Pick<StoreContext, "all">,
+  row: NoteRow,
+): Promise<NoteRecord> {
   return {
     ...mapNote(row),
-    artifacts: listArtifacts(ctx, "note", row.id),
+    artifacts: await listArtifacts(ctx, "note", row.id),
   };
 }

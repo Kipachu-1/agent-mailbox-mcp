@@ -1,11 +1,12 @@
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { createArtifactStorage } from "./artifact-storage";
 import type { HttpServerConfig } from "./config";
 import { readHttpServerConfig } from "./config";
 import { createLocalCommsMcpServer } from "./mcp";
 import type { AccessKeyRecord } from "./store";
-import { LocalCommsStore } from "./store";
+import { createCommsStore } from "./store";
 
 interface HttpSession {
   accessKeyId: string;
@@ -22,12 +23,13 @@ export interface AgentMailboxHttpServer {
   url: string;
 }
 
-export function startAgentMailboxHttpServer(
+export async function startAgentMailboxHttpServer(
   config: HttpServerConfig = readHttpServerConfig(),
-): AgentMailboxHttpServer {
-  const store = new LocalCommsStore(config.dbPath);
+): Promise<AgentMailboxHttpServer> {
+  const store = await createCommsStore(config.database);
+  const artifactStorage = createArtifactStorage(config.s3);
   for (const entry of config.tokens) {
-    store.createAccessKey({
+    await store.createAccessKey({
       token: entry.token,
       name: `Bootstrap: ${entry.agent.id}`,
       agentId: entry.agent.id,
@@ -45,9 +47,12 @@ export function startAgentMailboxHttpServer(
     async fetch(request) {
       const url = new URL(request.url);
       if (request.method === "GET" && url.pathname === healthPath) {
+        const keys = await store.listAccessKeys();
         return jsonResponse(200, {
           name: "agent-mailbox",
-          access_keys: store.listAccessKeys().length,
+          access_keys: keys.length,
+          database: store.database.kind,
+          s3_artifacts: artifactStorage.enabled,
           transport: "streamable-http",
           status: "ok",
           version: "0.1.0",
@@ -59,7 +64,7 @@ export function startAgentMailboxHttpServer(
       }
 
       if (url.pathname === config.path) {
-        const key = authenticateMcpRequest(request);
+        const key = await authenticateMcpRequest(request);
         if (!key) {
           return jsonResponse(401, { error: "Unauthorized" });
         }
@@ -78,7 +83,7 @@ export function startAgentMailboxHttpServer(
     },
   });
 
-  function authenticateMcpRequest(request: Request): AccessKeyRecord | null {
+  async function authenticateMcpRequest(request: Request): Promise<AccessKeyRecord | null> {
     const token = bearerToken(request);
     if (!token) {
       return null;
@@ -92,11 +97,11 @@ export function startAgentMailboxHttpServer(
     }
 
     if (request.method === "GET" && url.pathname === "/api/overview") {
-      return jsonResponse(200, overviewPayload());
+      return jsonResponse(200, await overviewPayload());
     }
 
     if (request.method === "GET" && url.pathname === "/api/access-keys") {
-      return jsonResponse(200, { keys: store.listAccessKeys() });
+      return jsonResponse(200, { keys: await store.listAccessKeys() });
     }
 
     if (request.method === "POST" && url.pathname === "/api/access-keys") {
@@ -105,7 +110,7 @@ export function startAgentMailboxHttpServer(
         return jsonResponse(400, { error: "JSON object body required" });
       }
       try {
-        const created = store.createAccessKey({
+        const created = await store.createAccessKey({
           name: stringValue(body.name) ?? "",
           agentId: stringValue(body.agent_id) ?? "",
           agentName: stringValue(body.agent_name),
@@ -120,7 +125,7 @@ export function startAgentMailboxHttpServer(
     const revokeMatch = url.pathname.match(/^\/api\/access-keys\/([^/]+)\/revoke$/);
     if (request.method === "POST" && revokeMatch?.[1]) {
       try {
-        return jsonResponse(200, { key: store.revokeAccessKey(decodeURIComponent(revokeMatch[1])) });
+        return jsonResponse(200, { key: await store.revokeAccessKey(decodeURIComponent(revokeMatch[1])) });
       } catch (error) {
         return jsonResponse(404, { error: errorMessage(error) });
       }
@@ -129,13 +134,15 @@ export function startAgentMailboxHttpServer(
     return jsonResponse(404, { error: "Not found" });
   }
 
-  function overviewPayload() {
-    const keys = store.listAccessKeys();
-    const agents = store.listAgents();
-    const onlineAgents = store.whoIsOnline(undefined, 300);
-    const tasks = store.listAllTasks({ limit: 200 });
-    const locks = store.listAllLocks();
-    const pinnedNotes = store.listAllNotes({ pinnedOnly: true, limit: 50 });
+  async function overviewPayload() {
+    const [keys, agents, onlineAgents, tasks, locks, pinnedNotes] = await Promise.all([
+      store.listAccessKeys(),
+      store.listAgents(),
+      store.whoIsOnline(undefined, 300),
+      store.listAllTasks({ limit: 200 }),
+      store.listAllLocks(),
+      store.listAllNotes({ pinnedOnly: true, limit: 50 }),
+    ]);
     const workspaces = Array.from(
       new Set([
         ...keys.map((item) => item.workspace),
@@ -202,8 +209,8 @@ export function startAgentMailboxHttpServer(
       },
     });
     const agent = agentFromAccessKey(key);
-    store.registerAgent(agent);
-    mcpServer = createLocalCommsMcpServer(store, agent);
+    await store.registerAgent(agent);
+    mcpServer = createLocalCommsMcpServer(store, agent, artifactStorage);
     await mcpServer.connect(transport);
     return transport.handleRequest(request, { parsedBody });
   }
@@ -240,7 +247,7 @@ export function startAgentMailboxHttpServer(
       await session.transport.close();
       session.server.close();
     }
-    store.close();
+    await store.close();
     await bunServer.stop(true);
   }
 
@@ -316,7 +323,7 @@ function errorMessage(error: unknown): string {
 }
 
 if (import.meta.main) {
-  const httpServer = startAgentMailboxHttpServer();
+  const httpServer = await startAgentMailboxHttpServer();
   console.log(`Agent Mailbox Streamable HTTP listening at ${httpServer.url}`);
 
   const shutdown = async () => {

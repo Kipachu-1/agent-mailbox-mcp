@@ -1,10 +1,15 @@
 import { mkdirSync } from "node:fs";
-import { Database, type SQLQueryBindings } from "bun:sqlite";
-import { dbDirectory, defaultDbPath } from "./config";
+import { SQL } from "bun";
+import { dbDirectory, defaultDbPath, readStoreConfig, type StoreConfig } from "./config";
 import * as accessKeysStore from "./store/access-keys";
 import * as agentsStore from "./store/agents";
 import * as artifactsStore from "./store/artifacts";
-import type { StoreContext, StoreRunResult } from "./store/context";
+import type {
+  StoreContext,
+  StoreDialect,
+  StoreRunResult,
+  StoreValue,
+} from "./store/context";
 import * as locksStore from "./store/locks";
 import * as messagesStore from "./store/messages";
 import * as notesStore from "./store/notes";
@@ -14,6 +19,7 @@ import type {
   AccessKeyRecord,
   AcquireLockInput,
   AgentRecord,
+  ArtifactInput,
   ArtifactOwnerType,
   ArtifactRecord,
   CreateAccessKeyInput,
@@ -71,160 +77,224 @@ export type {
   WriteNoteInput,
 } from "./store/types";
 
+export interface StoreDatabaseInfo {
+  kind: StoreDialect;
+  label: string;
+}
+
+interface SqlClient {
+  unsafe<T = unknown>(sql: string, values?: StoreValue[]): PromiseLike<T[]>;
+  begin<T>(fn: (sql: SqlClient) => Promise<T>): Promise<T>;
+  close?(options?: { timeout?: number }): Promise<void>;
+}
+
 export class LocalCommsStore {
-  private readonly db: Database;
+  private constructor(
+    private readonly db: BunSqlDatabase,
+    readonly database: StoreDatabaseInfo,
+  ) {}
 
-  constructor(readonly path: string = defaultDbPath()) {
+  static async open(config: StoreConfig = readStoreConfig()): Promise<LocalCommsStore> {
+    if (config.kind === "postgres") {
+      return LocalCommsStore.openPostgres(config.url);
+    }
+    return LocalCommsStore.openSqlite(config.path);
+  }
+
+  static async openSqlite(path: string = defaultDbPath()): Promise<LocalCommsStore> {
     mkdirSync(dbDirectory(path), { recursive: true });
-    this.db = new Database(path, { create: true, strict: true });
-    const context = this.context();
-    configureDatabase(context);
-    migrateDatabase(context);
+    const db = new BunSqlDatabase(
+      new SQL({
+        adapter: "sqlite",
+        filename: path,
+        create: true,
+        strict: true,
+      }) as unknown as SqlClient,
+      "sqlite",
+    );
+    await configureDatabase(db.context());
+    await migrateDatabase(db.context());
+    return new LocalCommsStore(db, { kind: "sqlite", label: path });
   }
 
-  close(): void {
-    this.db.close();
+  static async openPostgres(url: string): Promise<LocalCommsStore> {
+    const db = new BunSqlDatabase(new SQL(url) as unknown as SqlClient, "postgres");
+    await configureDatabase(db.context());
+    await migrateDatabase(db.context());
+    return new LocalCommsStore(db, { kind: "postgres", label: url });
   }
 
-  registerAgent(input: RegisterAgentInput): AgentRecord {
+  async close(): Promise<void> {
+    await this.db.close();
+  }
+
+  async registerAgent(input: RegisterAgentInput): Promise<AgentRecord> {
     return agentsStore.registerAgent(this.context(), input);
   }
 
-  heartbeat(input: RegisterAgentInput): AgentRecord {
+  async heartbeat(input: RegisterAgentInput): Promise<AgentRecord> {
     return this.registerAgent(input);
   }
 
-  listAgents(workspace?: string): AgentRecord[] {
+  async listAgents(workspace?: string): Promise<AgentRecord[]> {
     return agentsStore.listAgents(this.context(), workspace);
   }
 
-  whoIsOnline(workspace?: string, activeWithinSeconds = 300): AgentRecord[] {
+  async whoIsOnline(workspace?: string, activeWithinSeconds = 300): Promise<AgentRecord[]> {
     return agentsStore.whoIsOnline(this.context(), workspace, activeWithinSeconds);
   }
 
-  getAgent(id: string, workspace?: string): AgentRecord | null {
+  async getAgent(id: string, workspace?: string): Promise<AgentRecord | null> {
     return agentsStore.getAgent(this.context(), id, workspace);
   }
 
-  sendMessage(input: SendMessageInput): MessageRecord {
+  async sendMessage(input: SendMessageInput): Promise<MessageRecord> {
     return messagesStore.sendMessage(this.context(), input);
   }
 
-  replyMessage(input: ReplyMessageInput): MessageRecord {
+  async replyMessage(input: ReplyMessageInput): Promise<MessageRecord> {
     return messagesStore.replyMessage(this.context(), input);
   }
 
-  inbox(agentId: string, options: InboxOptions = {}): MessageRecord[] {
+  async inbox(agentId: string, options: InboxOptions = {}): Promise<MessageRecord[]> {
     return messagesStore.inbox(this.context(), agentId, options);
   }
 
-  readMessage(agentId: string, messageId: string, workspace?: string): MessageRecord {
+  async readMessage(
+    agentId: string,
+    messageId: string,
+    workspace?: string,
+  ): Promise<MessageRecord> {
     return messagesStore.readMessage(this.context(), agentId, messageId, workspace);
   }
 
-  searchMessages(agentId: string, options: SearchMessagesOptions): MessageRecord[] {
+  async searchMessages(
+    agentId: string,
+    options: SearchMessagesOptions,
+  ): Promise<MessageRecord[]> {
     return messagesStore.searchMessages(this.context(), agentId, options);
   }
 
-  listThreads(agentId: string, workspace?: string, limitValue?: number): ThreadRecord[] {
+  async listThreads(
+    agentId: string,
+    workspace?: string,
+    limitValue?: number,
+  ): Promise<ThreadRecord[]> {
     return messagesStore.listThreads(this.context(), agentId, workspace, limitValue);
   }
 
-  getThread(
+  async getThread(
     agentId: string,
     threadId: string,
     workspace?: string,
     limitValue?: number,
-  ): MessageRecord[] {
+  ): Promise<MessageRecord[]> {
     return messagesStore.getThread(this.context(), agentId, threadId, workspace, limitValue);
   }
 
-  createTask(input: CreateTaskInput): TaskRecord {
+  async createTask(input: CreateTaskInput): Promise<TaskRecord> {
     return tasksStore.createTask(this.context(), input);
   }
 
-  listTasks(agentId: string, options: ListTasksOptions = {}): TaskRecord[] {
+  async listTasks(agentId: string, options: ListTasksOptions = {}): Promise<TaskRecord[]> {
     return tasksStore.listTasks(this.context(), agentId, options);
   }
 
-  listAllTasks(options: Omit<ListTasksOptions, "assigneeId" | "creatorId"> = {}): TaskRecord[] {
+  async listAllTasks(
+    options: Omit<ListTasksOptions, "assigneeId" | "creatorId"> = {},
+  ): Promise<TaskRecord[]> {
     return tasksStore.listAllTasks(this.context(), options);
   }
 
-  claimTask(agentId: string, taskId: string, note?: string, workspace?: string): TaskRecord {
+  async claimTask(
+    agentId: string,
+    taskId: string,
+    note?: string,
+    workspace?: string,
+  ): Promise<TaskRecord> {
     return tasksStore.claimTask(this.context(), agentId, taskId, note, workspace);
   }
 
-  updateTask(input: UpdateTaskInput): TaskRecord {
+  async updateTask(input: UpdateTaskInput): Promise<TaskRecord> {
     return tasksStore.updateTask(this.context(), input);
   }
 
-  listVisibleTaskEvents(agentId: string, taskId: string, workspace?: string): TaskEventRecord[] {
+  async listVisibleTaskEvents(
+    agentId: string,
+    taskId: string,
+    workspace?: string,
+  ): Promise<TaskEventRecord[]> {
     return tasksStore.listVisibleTaskEvents(this.context(), agentId, taskId, workspace);
   }
 
-  writeNote(input: WriteNoteInput): NoteRecord {
+  async writeNote(input: WriteNoteInput): Promise<NoteRecord> {
     return notesStore.writeNote(this.context(), input);
   }
 
-  readNotes(options: ReadNotesOptions = {}): NoteRecord[] {
+  async readNotes(options: ReadNotesOptions = {}): Promise<NoteRecord[]> {
     return notesStore.readNotes(this.context(), options);
   }
 
-  listAllNotes(options: Omit<ReadNotesOptions, "workspace" | "channel" | "query"> = {}): NoteRecord[] {
+  async listAllNotes(
+    options: Omit<ReadNotesOptions, "workspace" | "channel" | "query"> = {},
+  ): Promise<NoteRecord[]> {
     return notesStore.listAllNotes(this.context(), options);
   }
 
-  pinNote(noteId: string, pinned: boolean, workspace?: string): NoteRecord {
+  async pinNote(noteId: string, pinned: boolean, workspace?: string): Promise<NoteRecord> {
     return notesStore.pinNote(this.context(), noteId, pinned, workspace);
   }
 
-  summarizeChannel(agentId: string, workspace?: string, channel?: string): Record<string, unknown> {
+  async summarizeChannel(
+    agentId: string,
+    workspace?: string,
+    channel?: string,
+  ): Promise<Record<string, unknown>> {
     return notesStore.summarizeChannel(this.context(), agentId, workspace, channel);
   }
 
-  acquireLock(input: AcquireLockInput): LockRecord {
+  async acquireLock(input: AcquireLockInput): Promise<LockRecord> {
     return locksStore.acquireLock(this.context(), input);
   }
 
-  releaseLock(agentId: string, resource: string, workspace?: string): LockRecord {
+  async releaseLock(agentId: string, resource: string, workspace?: string): Promise<LockRecord> {
     return locksStore.releaseLock(this.context(), agentId, resource, workspace);
   }
 
-  listLocks(options: ListLocksOptions = {}): LockRecord[] {
+  async listLocks(options: ListLocksOptions = {}): Promise<LockRecord[]> {
     return locksStore.listLocks(this.context(), options);
   }
 
-  listAllLocks(options: Pick<ListLocksOptions, "includeExpired"> = {}): LockRecord[] {
+  async listAllLocks(options: Pick<ListLocksOptions, "includeExpired"> = {}): Promise<LockRecord[]> {
     return locksStore.listAllLocks(this.context(), options);
   }
 
-  createAccessKey(input: CreateAccessKeyInput): CreatedAccessKeyRecord {
+  async createAccessKey(input: CreateAccessKeyInput): Promise<CreatedAccessKeyRecord> {
     return accessKeysStore.createAccessKey(this.context(), input);
   }
 
-  listAccessKeys(): AccessKeyRecord[] {
+  async listAccessKeys(): Promise<AccessKeyRecord[]> {
     return accessKeysStore.listAccessKeys(this.context());
   }
 
-  authenticateAccessToken(token: string): AccessKeyRecord | null {
+  async authenticateAccessToken(token: string): Promise<AccessKeyRecord | null> {
     return accessKeysStore.authenticateAccessToken(this.context(), token);
   }
 
-  revokeAccessKey(id: string): AccessKeyRecord {
+  async revokeAccessKey(id: string): Promise<AccessKeyRecord> {
     return accessKeysStore.revokeAccessKey(this.context(), id);
   }
 
-  updatesSince(agentId: string, workspace?: string, since?: string): UpdatesRecord {
+  async updatesSince(agentId: string, workspace?: string, since?: string): Promise<UpdatesRecord> {
     return updatesStore.updatesSince(this.context(), agentId, workspace, since);
   }
 
-  listVisibleArtifacts(
+  async listVisibleArtifacts(
     agentId: string,
     workspace: string | undefined,
     ownerType: ArtifactOwnerType,
     ownerId: string,
-  ): ArtifactRecord[] {
+  ): Promise<ArtifactRecord[]> {
     return artifactsStore.listVisibleArtifacts(
       this.context(),
       agentId,
@@ -234,28 +304,128 @@ export class LocalCommsStore {
     );
   }
 
+  async addVisibleArtifact(
+    agentId: string,
+    workspace: string | undefined,
+    ownerType: ArtifactOwnerType,
+    ownerId: string,
+    artifact: ArtifactInput,
+    artifactId?: string,
+  ): Promise<ArtifactRecord> {
+    return artifactsStore.addVisibleArtifact(
+      this.context(),
+      agentId,
+      workspace,
+      ownerType,
+      ownerId,
+      artifact,
+      artifactId,
+    );
+  }
+
+  async getVisibleArtifact(
+    agentId: string,
+    workspace: string | undefined,
+    ownerType: ArtifactOwnerType,
+    ownerId: string,
+    artifactId: string,
+  ): Promise<ArtifactRecord> {
+    return artifactsStore.getVisibleArtifact(
+      this.context(),
+      agentId,
+      workspace,
+      ownerType,
+      ownerId,
+      artifactId,
+    );
+  }
+
   private context(): StoreContext {
+    return this.db.context();
+  }
+}
+
+export function createCommsStore(config: StoreConfig = readStoreConfig()): Promise<LocalCommsStore> {
+  return LocalCommsStore.open(config);
+}
+
+class BunSqlDatabase {
+  constructor(
+    private readonly sql: SqlClient,
+    readonly dialect: StoreDialect,
+  ) {}
+
+  context(): StoreContext {
+    return this.createContext(this.sql);
+  }
+
+  async close(): Promise<void> {
+    await this.sql.close?.();
+  }
+
+  private createContext(client: SqlClient): StoreContext {
     return {
-      all: <T>(sql: string, params: SQLQueryBindings[]) => this.all<T>(sql, params),
-      exec: (sql: string) => this.exec(sql),
-      get: <T>(sql: string, params: SQLQueryBindings[]) => this.get<T>(sql, params),
-      run: (sql: string, params: SQLQueryBindings[]) => this.run(sql, params),
+      dialect: this.dialect,
+      all: async <T>(sql: string, params: StoreValue[]) => this.all<T>(client, sql, params),
+      exec: async (sql: string) => {
+        await this.exec(client, sql);
+      },
+      get: async <T>(sql: string, params: StoreValue[]) => this.get<T>(client, sql, params),
+      run: async (sql: string, params: StoreValue[]) => this.run(client, sql, params),
+      transaction: async <T>(fn: (ctx: StoreContext) => Promise<T>) =>
+        client.begin((tx) => fn(this.createContext(tx))),
     };
   }
 
-  private exec(sql: string): void {
-    this.db.exec(sql);
+  private async all<T>(client: SqlClient, sql: string, params: StoreValue[]): Promise<T[]> {
+    return client.unsafe<T>(this.prepare(sql), params);
   }
 
-  private run(sql: string, params: SQLQueryBindings[]): StoreRunResult {
-    return this.db.query(sql).run(...params);
+  private async get<T>(
+    client: SqlClient,
+    sql: string,
+    params: StoreValue[],
+  ): Promise<T | null> {
+    const rows = await this.all<T>(client, sql, params);
+    return rows[0] ?? null;
   }
 
-  private get<T>(sql: string, params: SQLQueryBindings[]): T | null {
-    return this.db.query<T, SQLQueryBindings[]>(sql).get(...params);
+  private async run(
+    client: SqlClient,
+    sql: string,
+    params: StoreValue[],
+  ): Promise<StoreRunResult> {
+    const result = await client.unsafe(this.prepare(sql), params);
+    const metadata = result as unknown as { affectedRows?: number; count?: number };
+    return { changes: Number(metadata.affectedRows ?? metadata.count ?? 0) };
   }
 
-  private all<T>(sql: string, params: SQLQueryBindings[]): T[] {
-    return this.db.query<T, SQLQueryBindings[]>(sql).all(...params);
+  private async exec(client: SqlClient, sql: string): Promise<void> {
+    if (this.dialect === "sqlite") {
+      for (const statement of splitSqlStatements(sql)) {
+        await client.unsafe(statement);
+      }
+      return;
+    }
+    await client.unsafe(this.prepare(sql));
   }
+
+  private prepare(sql: string): string {
+    if (this.dialect === "sqlite") {
+      return sql;
+    }
+    return toPostgresPlaceholders(sql);
+  }
+}
+
+function toPostgresPlaceholders(sql: string): string {
+  let index = 0;
+  return sql.replaceAll("?", () => `$${++index}`);
+}
+
+function splitSqlStatements(sql: string): string[] {
+  return sql
+    .split(";")
+    .map((statement) => statement.trim())
+    .filter(Boolean);
 }

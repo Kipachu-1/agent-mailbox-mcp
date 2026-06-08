@@ -1,4 +1,4 @@
-import { defaultDbPath, readAgentConfig, type AgentConfig } from "./config";
+import { readAgentConfig, readStoreConfig, type AgentConfig, type StoreConfig } from "./config";
 import {
   buildNextActions,
   buildSessionSummary,
@@ -9,6 +9,7 @@ import {
 } from "./session";
 import {
   LocalCommsStore,
+  createCommsStore,
   type AgentRecord,
   type LockRecord,
   type MessageRecord,
@@ -24,32 +25,32 @@ interface ParsedArgs {
 }
 
 const args = parseArgs(Bun.argv.slice(2));
-const dbPath = defaultDbPath();
+const storeConfig = readStoreConfig();
 
 if (args.command === "doctor") {
-  doctor(dbPath);
+  await doctor(storeConfig);
 } else {
-  const store = new LocalCommsStore(dbPath);
+  const store = await createCommsStore(storeConfig);
   try {
     const agent = readAgentConfig();
-    store.registerAgent(agent);
+    await store.registerAgent(agent);
     const workspace = stringFlag(args, "workspace") ?? agent.workspace;
 
     switch (args.command) {
       case "session":
-        session(store, agent, workspace);
+        await session(store, agent, workspace);
         break;
       case "agents":
-        print({ agents: store.listAgents(workspace) });
+        print({ agents: await store.listAgents(workspace) });
         break;
       case "online":
         print({
-          agents: store.whoIsOnline(workspace, numberFlag(args, "active-within-seconds") ?? 300),
+          agents: await store.whoIsOnline(workspace, numberFlag(args, "active-within-seconds") ?? 300),
         });
         break;
       case "inbox":
         print({
-          messages: store.inbox(agent.id, {
+          messages: await store.inbox(agent.id, {
             workspace,
             channel: stringFlag(args, "channel"),
             unreadOnly: Boolean(args.flags.unread),
@@ -59,14 +60,14 @@ if (args.command === "doctor") {
         });
         break;
       case "send":
-        send(store, agent, workspace);
+        await send(store, agent, workspace);
         break;
       case "reply":
-        reply(store, agent, workspace);
+        await reply(store, agent, workspace);
         break;
       case "tasks":
         print({
-          tasks: store.listTasks(agent.id, {
+          tasks: await store.listTasks(agent.id, {
             workspace,
             status: optionalTaskStatus(args, "status"),
             channel: stringFlag(args, "channel"),
@@ -77,7 +78,7 @@ if (args.command === "doctor") {
         break;
       case "create-task":
         print({
-          task: store.createTask({
+          task: await store.createTask({
             creatorId: agent.id,
             workspace,
             title: requireText(args, "title or positional title"),
@@ -90,12 +91,12 @@ if (args.command === "doctor") {
         break;
       case "claim-task":
         print({
-          task: store.claimTask(agent.id, requireText(args, "task id"), stringFlag(args, "note"), workspace),
+          task: await store.claimTask(agent.id, requireText(args, "task id"), stringFlag(args, "note"), workspace),
         });
         break;
       case "update-task":
         print({
-          task: store.updateTask({
+          task: await store.updateTask({
             agentId: agent.id,
             workspace,
             taskId: requireText(args, "task id"),
@@ -106,7 +107,7 @@ if (args.command === "doctor") {
         break;
       case "notes":
         print({
-          notes: store.readNotes({
+          notes: await store.readNotes({
             workspace,
             channel: stringFlag(args, "channel"),
             pinnedOnly: Boolean(args.flags.pinned),
@@ -117,7 +118,7 @@ if (args.command === "doctor") {
         break;
       case "write-note":
         print({
-          note: store.writeNote({
+          note: await store.writeNote({
             agentId: agent.id,
             workspace,
             noteId: stringFlag(args, "id"),
@@ -130,7 +131,7 @@ if (args.command === "doctor") {
         break;
       case "locks":
         print({
-          locks: store.listLocks({
+          locks: await store.listLocks({
             workspace,
             includeExpired: Boolean(args.flags["include-expired"]),
             resource: stringFlag(args, "resource"),
@@ -139,7 +140,7 @@ if (args.command === "doctor") {
         break;
       case "acquire-lock":
         print({
-          lock: store.acquireLock({
+          lock: await store.acquireLock({
             agentId: agent.id,
             workspace,
             resource: requireText(args, "resource"),
@@ -149,7 +150,7 @@ if (args.command === "doctor") {
         });
         break;
       case "release-lock":
-        print({ lock: store.releaseLock(agent.id, requireText(args, "resource"), workspace) });
+        print({ lock: await store.releaseLock(agent.id, requireText(args, "resource"), workspace) });
         break;
       case "help":
       case "":
@@ -159,7 +160,7 @@ if (args.command === "doctor") {
         throw new Error(`Unknown command '${args.command}'. Run 'bun run cli help'.`);
     }
   } finally {
-    store.close();
+    await store.close();
   }
 }
 
@@ -189,64 +190,75 @@ interface DoctorCheck {
 interface DoctorPayload {
   ok: boolean;
   database: {
-    path: string;
+    kind: string;
+    label: string;
   };
   agent: AgentConfig | null;
   workspace: string;
   checks: DoctorCheck[];
 }
 
-function session(
+async function session(
   store: LocalCommsStore,
   agent: AgentConfig,
   workspace: string | undefined,
-): void {
+): Promise<void> {
   const channel = stringFlag(args, "channel");
   const limit = numberFlag(args, "limit");
-  const currentAgent = store.registerAgent({
+  const currentAgent = await store.registerAgent({
     id: agent.id,
     name: agent.name,
     workspace,
     status: stringFlag(args, "status"),
     currentTaskId: stringFlag(args, "current-task"),
   });
-  const unreadMessages = store.inbox(agent.id, {
-    workspace,
-    channel,
-    unreadOnly: true,
-    includeSent: false,
-    limit,
-  });
-  const openTasks = store.listTasks(agent.id, {
-    workspace,
-    channel,
-    status: "open",
-    limit,
-  });
-  const claimedTasks = store.listTasks(agent.id, {
-    workspace,
-    channel,
-    status: "claimed",
-    assigneeId: agent.id,
-    limit,
-  });
-  const staleClaimedTasks = store.listTasks(agent.id, {
-    workspace,
-    channel,
-    staleAfterSeconds: numberFlag(args, "stale-after-seconds") ?? 3_600,
-    limit,
-  });
-  const activeLocks = store.listLocks({ workspace });
-  const pinnedNotes = store.readNotes({
-    workspace,
-    channel,
-    pinnedOnly: true,
-    limit,
-  });
-  const onlineAgents = store.whoIsOnline(
-    workspace,
-    numberFlag(args, "active-within-seconds"),
-  );
+  const [
+    unreadMessages,
+    openTasks,
+    claimedTasks,
+    staleClaimedTasks,
+    activeLocks,
+    pinnedNotes,
+    onlineAgents,
+  ] = await Promise.all([
+    store.inbox(agent.id, {
+      workspace,
+      channel,
+      unreadOnly: true,
+      includeSent: false,
+      limit,
+    }),
+    store.listTasks(agent.id, {
+      workspace,
+      channel,
+      status: "open",
+      limit,
+    }),
+    store.listTasks(agent.id, {
+      workspace,
+      channel,
+      status: "claimed",
+      assigneeId: agent.id,
+      limit,
+    }),
+    store.listTasks(agent.id, {
+      workspace,
+      channel,
+      staleAfterSeconds: numberFlag(args, "stale-after-seconds") ?? 3_600,
+      limit,
+    }),
+    store.listLocks({ workspace }),
+    store.readNotes({
+      workspace,
+      channel,
+      pinnedOnly: true,
+      limit,
+    }),
+    store.whoIsOnline(
+      workspace,
+      numberFlag(args, "active-within-seconds"),
+    ),
+  ]);
   const collections = {
     unreadMessages,
     openTasks,
@@ -281,7 +293,7 @@ function session(
   print(payload, formatSession(payload));
 }
 
-function doctor(dbPath: string): void {
+async function doctor(config: StoreConfig): Promise<void> {
   const checks: DoctorCheck[] = [];
   let agent: AgentConfig | null = null;
   try {
@@ -301,19 +313,19 @@ function doctor(dbPath: string): void {
 
   const workspace = stringFlag(args, "workspace") ?? agent?.workspace;
   try {
-    const store = new LocalCommsStore(dbPath);
+    const store = await createCommsStore(config);
     try {
       if (agent) {
-        store.registerAgent({ ...agent, workspace });
+        await store.registerAgent({ ...agent, workspace });
       }
-      const agents = store.listAgents(workspace);
+      const agents = await store.listAgents(workspace);
       checks.push({
         name: "store",
         ok: true,
         detail: `${agents.length} agent record(s) visible in workspace '${workspaceName(workspace)}'.`,
       });
     } finally {
-      store.close();
+      await store.close();
     }
   } catch (error) {
     checks.push({
@@ -325,7 +337,7 @@ function doctor(dbPath: string): void {
 
   const payload: DoctorPayload = {
     ok: checks.every((check) => check.ok),
-    database: { path: dbPath },
+    database: { kind: config.kind, label: config.kind === "sqlite" ? config.path : config.url },
     agent,
     workspace: workspaceName(workspace),
     checks,
@@ -336,11 +348,15 @@ function doctor(dbPath: string): void {
   }
 }
 
-function send(store: LocalCommsStore, agent: AgentConfig, workspace: string | undefined): void {
+async function send(
+  store: LocalCommsStore,
+  agent: AgentConfig,
+  workspace: string | undefined,
+): Promise<void> {
   const recipientId = stringFlag(args, "to");
   const channel = stringFlag(args, "channel");
   print({
-    message: store.sendMessage({
+    message: await store.sendMessage({
       senderId: agent.id,
       workspace,
       recipientId,
@@ -351,13 +367,17 @@ function send(store: LocalCommsStore, agent: AgentConfig, workspace: string | un
   });
 }
 
-function reply(store: LocalCommsStore, agent: AgentConfig, workspace: string | undefined): void {
+async function reply(
+  store: LocalCommsStore,
+  agent: AgentConfig,
+  workspace: string | undefined,
+): Promise<void> {
   const body = args.positional.slice(1).join(" ") || stringFlag(args, "body") || "";
   if (!body.trim()) {
     throw new Error("Missing reply body.");
   }
   print({
-    message: store.replyMessage({
+    message: await store.replyMessage({
       senderId: agent.id,
       workspace,
       messageId: stringFlag(args, "message") ?? args.positional[0] ?? "",
@@ -464,7 +484,7 @@ function formatSession(payload: SessionPayload): string {
 function formatDoctor(payload: DoctorPayload): string {
   const lines = [
     `Agent Mailbox doctor: ${payload.ok ? "ok" : "failed"}`,
-    `Database: ${payload.database.path}`,
+    `Database: ${payload.database.kind} ${payload.database.label}`,
     `Workspace: ${payload.workspace}`,
     ...payload.checks.map((check) =>
       `${check.ok ? "ok" : "error"} ${check.name}: ${check.detail}`,

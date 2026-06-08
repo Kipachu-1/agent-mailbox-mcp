@@ -14,13 +14,13 @@ afterEach(() => {
 
 test("CLI claim-task respects the configured workspace", async () => {
   const { path } = tempDb();
-  const store = new LocalCommsStore(path);
-  const task = store.createTask({
+  const store = await LocalCommsStore.openSqlite(path);
+  const task = await store.createTask({
     creatorId: "codex",
     workspace: "repo-a",
     title: "Repo A task",
   });
-  store.close();
+  await store.close();
 
   const wrongWorkspace = await runCli(path, "claude", "repo-b", ["claim-task", task.id]);
   expect(wrongWorkspace.exitCode).toBe(1);
@@ -45,14 +45,14 @@ test("CLI rejects invalid task statuses and numeric flags", async () => {
 
 test("CLI reply requires a non-empty body", async () => {
   const { path } = tempDb();
-  const store = new LocalCommsStore(path);
-  const message = store.sendMessage({
+  const store = await LocalCommsStore.openSqlite(path);
+  const message = await store.sendMessage({
     senderId: "codex",
     workspace: "repo-a",
     recipientId: "claude",
     body: "Please reply.",
   });
-  store.close();
+  await store.close();
 
   const result = await runCli(path, "claude", "repo-a", ["reply", message.id]);
   expect(result.exitCode).toBe(1);
@@ -61,31 +61,31 @@ test("CLI reply requires a non-empty body", async () => {
 
 test("CLI session mirrors startup digest as JSON and text", async () => {
   const { path } = tempDb();
-  const store = new LocalCommsStore(path);
-  const message = store.sendMessage({
+  const store = await LocalCommsStore.openSqlite(path);
+  const message = await store.sendMessage({
     senderId: "codex",
     workspace: "repo-a",
     recipientId: "claude",
     body: "Please handle this handoff.",
   });
-  const task = store.createTask({
+  const task = await store.createTask({
     creatorId: "codex",
     workspace: "repo-a",
     title: "Open handoff task",
   });
-  store.writeNote({
+  await store.writeNote({
     agentId: "codex",
     workspace: "repo-a",
     title: "Convention",
     body: "Use locks before edits.",
     pinned: true,
   });
-  store.acquireLock({
+  await store.acquireLock({
     agentId: "codex",
     workspace: "repo-a",
     resource: "src/cli.ts",
   });
-  store.close();
+  await store.close();
 
   const jsonResult = await runCli(path, "claude", "repo-a", ["session"]);
   expect(jsonResult.exitCode).toBe(0);
@@ -112,7 +112,8 @@ test("CLI doctor reports identity and store readiness", async () => {
   expect(jsonResult.exitCode).toBe(0);
   const parsed = JSON.parse(jsonResult.stdout);
   expect(parsed.ok).toBe(true);
-  expect(parsed.database.path).toBe(path);
+  expect(parsed.database.kind).toBe("sqlite");
+  expect(parsed.database.label).toBe(path);
   expect(parsed.agent.id).toBe("claude");
   expect(parsed.checks.map((check: { name: string }) => check.name)).toEqual([
     "identity",

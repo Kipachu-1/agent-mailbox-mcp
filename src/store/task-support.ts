@@ -1,12 +1,11 @@
-import type { SQLQueryBindings } from "bun:sqlite";
-import type { StoreContext } from "./context";
+import { doNothingOnConflict, insertOrIgnore, type StoreContext, type StoreValue } from "./context";
 import { durationSeconds, emptyToNull, isoNow } from "./mappers";
 import { sendMessage } from "./messages";
 import type { ListTasksOptions, TaskEventRecord, TaskRecord, TaskStatus } from "./types";
 
 export function addTaskFilters(
   clauses: string[],
-  params: SQLQueryBindings[],
+  params: StoreValue[],
   options: ListTasksOptions,
 ): void {
   if (options.status) {
@@ -36,66 +35,69 @@ export function addTaskFilters(
   }
 }
 
-export function insertTaskEvent(
+export async function insertTaskEvent(
   ctx: Pick<StoreContext, "run">,
   taskId: string,
   agentId: string,
   eventType: string,
   status: TaskStatus,
   note?: string,
-): void {
-  ctx.run(
+): Promise<void> {
+  await ctx.run(
     `INSERT INTO task_events (id, task_id, agent_id, event_type, status, note, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?)`,
     [crypto.randomUUID(), taskId, agentId, eventType, status, emptyToNull(note), isoNow()],
   );
 }
 
-export function replaceTaskDependencies(
-  ctx: Pick<StoreContext, "run">,
+export async function replaceTaskDependencies(
+  ctx: Pick<StoreContext, "dialect" | "run">,
   taskId: string,
   dependencies: string[],
-): void {
-  ctx.run(`DELETE FROM task_dependencies WHERE task_id = ?`, [taskId]);
+): Promise<void> {
+  await ctx.run(`DELETE FROM task_dependencies WHERE task_id = ?`, [taskId]);
   for (const dependency of dependencies.filter(Boolean)) {
-    ctx.run(
-      `INSERT OR IGNORE INTO task_dependencies (task_id, depends_on_task_id)
-       VALUES (?, ?)`,
+    await ctx.run(
+      `${insertOrIgnore(ctx)} task_dependencies (task_id, depends_on_task_id)
+       VALUES (?, ?) ${doNothingOnConflict(ctx)}`,
       [taskId, dependency],
     );
   }
 }
 
-export function taskDependencies(ctx: Pick<StoreContext, "all">, taskId: string): string[] {
-  return ctx.all<{ depends_on_task_id: string }>(
-    `SELECT depends_on_task_id FROM task_dependencies WHERE task_id = ? ORDER BY depends_on_task_id`,
-    [taskId],
-  ).map((row) => row.depends_on_task_id);
-}
-
-export function listTaskEvents(
+export async function taskDependencies(
   ctx: Pick<StoreContext, "all">,
   taskId: string,
-): TaskEventRecord[] {
+): Promise<string[]> {
+  return (await ctx.all<{ depends_on_task_id: string }>(
+    `SELECT depends_on_task_id FROM task_dependencies WHERE task_id = ? ORDER BY depends_on_task_id`,
+    [taskId],
+  )).map((row) => row.depends_on_task_id);
+}
+
+export async function listTaskEvents(
+  ctx: Pick<StoreContext, "all">,
+  taskId: string,
+): Promise<TaskEventRecord[]> {
   return ctx.all<TaskEventRecord>(
     `SELECT * FROM task_events WHERE task_id = ? ORDER BY created_at ASC`,
     [taskId],
   );
 }
 
-export function sendTaskStatusNotification(
+export async function sendTaskStatusNotification(
   ctx: StoreContext,
   agentId: string,
   task: TaskRecord,
   note?: string,
-): void {
+): Promise<void> {
   if (agentId === task.creator_id) {
     return;
   }
 
   const statusLabel = task.status === "done" ? "completed" : task.status;
   const noteText = note?.trim() ? `\n\nNote: ${note.trim()}` : "";
-  sendMessage(ctx, {
+  await sendMessage(ctx, {
     senderId: agentId,
     workspace: task.workspace,
     recipientId: task.creator_id,

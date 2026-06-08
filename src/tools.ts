@@ -1,5 +1,10 @@
 import { DynamicTool, JSONToolOutput, type AnyTool } from "beeai-framework/tools/base";
 import { z } from "zod";
+import {
+  DisabledArtifactStorage,
+  MAX_ARTIFACT_READ_BYTES,
+  type ArtifactStorage,
+} from "./artifact-storage";
 import type { AgentConfig } from "./config";
 import {
   buildNextActions,
@@ -21,6 +26,8 @@ const artifactSchema = z.object({
   line: z.number().int().min(1).optional(),
   metadata: metadataSchema,
 });
+const artifactOwnerSchema = z.enum(["message", "task", "note"]);
+const artifactEncodingSchema = z.enum(["text", "base64"]);
 
 function communicationTool<Schema extends z.ZodTypeAny, Output>(fields: {
   name: string;
@@ -36,7 +43,12 @@ function communicationTool<Schema extends z.ZodTypeAny, Output>(fields: {
   });
 }
 
-export function createCommunicationTools(store: LocalCommsStore, agent: AgentConfig): AnyTool[] {
+export function createCommunicationTools(
+  store: LocalCommsStore,
+  agent: AgentConfig,
+  artifactStorage?: ArtifactStorage,
+): AnyTool[] {
+  const storage = artifactStorage ?? new DisabledArtifactStorage();
   return [
     communicationTool({
       name: "session_start",
@@ -58,7 +70,7 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
         const normalizedWorkspace = workspaceName(workspace);
         const channel = input.channel;
         const limit = input.limit;
-        const currentAgent = store.registerAgent({
+        const currentAgent = await store.registerAgent({
           id: agent.id,
           name: input.name ?? agent.name,
           workspace,
@@ -66,43 +78,53 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
           currentTaskId: input.current_task_id,
           metadata: input.metadata,
         });
-        const unreadMessages = store.inbox(agent.id, {
-          workspace,
-          channel,
-          unreadOnly: true,
-          includeSent: false,
-          limit,
-        });
-        const openTasks = store.listTasks(agent.id, {
-          workspace,
-          channel,
-          status: "open",
-          limit,
-        });
-        const claimedTasks = store.listTasks(agent.id, {
-          workspace,
-          channel,
-          status: "claimed",
-          assigneeId: agent.id,
-          limit,
-        });
-        const staleClaimedTasks = store.listTasks(agent.id, {
-          workspace,
-          channel,
-          staleAfterSeconds: input.stale_after_seconds ?? 3_600,
-          limit,
-        });
-        const activeLocks = store.listLocks({ workspace });
-        const pinnedNotes = store.readNotes({
-          workspace,
-          channel,
-          pinnedOnly: true,
-          limit,
-        });
-        const onlineAgents = store.whoIsOnline(
-          workspace,
-          input.active_within_seconds,
-        );
+        const [
+          unreadMessages,
+          openTasks,
+          claimedTasks,
+          staleClaimedTasks,
+          activeLocks,
+          pinnedNotes,
+          onlineAgents,
+        ] = await Promise.all([
+          store.inbox(agent.id, {
+            workspace,
+            channel,
+            unreadOnly: true,
+            includeSent: false,
+            limit,
+          }),
+          store.listTasks(agent.id, {
+            workspace,
+            channel,
+            status: "open",
+            limit,
+          }),
+          store.listTasks(agent.id, {
+            workspace,
+            channel,
+            status: "claimed",
+            assigneeId: agent.id,
+            limit,
+          }),
+          store.listTasks(agent.id, {
+            workspace,
+            channel,
+            staleAfterSeconds: input.stale_after_seconds ?? 3_600,
+            limit,
+          }),
+          store.listLocks({ workspace }),
+          store.readNotes({
+            workspace,
+            channel,
+            pinnedOnly: true,
+            limit,
+          }),
+          store.whoIsOnline(
+            workspace,
+            input.active_within_seconds,
+          ),
+        ]);
         const collections = {
           unreadMessages,
           openTasks,
@@ -149,7 +171,7 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
       }),
       handler: async (input) =>
         json({
-          agent: store.registerAgent({
+          agent: await store.registerAgent({
             id: agent.id,
             name: input.name ?? agent.name,
             workspace: input.workspace ?? agent.workspace,
@@ -171,7 +193,7 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
       }),
       handler: async (input) =>
         json({
-          agent: store.heartbeat({
+          agent: await store.heartbeat({
             id: agent.id,
             name: agent.name,
             workspace: input.workspace ?? agent.workspace,
@@ -185,7 +207,7 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
       name: "agent_status",
       description: "Get the current registered status for this local agent.",
       inputSchema: z.object({}),
-      handler: async () => json({ agent: store.getAgent(agent.id, workspaceName(agent.workspace)) }),
+      handler: async () => json({ agent: await store.getAgent(agent.id, workspaceName(agent.workspace)) }),
     }),
     communicationTool({
       name: "list_agents",
@@ -194,7 +216,7 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
       inputSchema: z.object({
         workspace: workspaceSchema,
       }),
-      handler: async (input) => json({ agents: store.listAgents(input.workspace) }),
+      handler: async (input) => json({ agents: await store.listAgents(input.workspace) }),
     }),
     communicationTool({
       name: "who_is_online",
@@ -206,7 +228,7 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
       }),
       handler: async (input) =>
         json({
-          agents: store.whoIsOnline(
+          agents: await store.whoIsOnline(
             input.workspace ?? agent.workspace,
             input.active_within_seconds,
           ),
@@ -228,7 +250,7 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
       }),
       handler: async (input) =>
         json({
-          message: store.sendMessage({
+          message: await store.sendMessage({
             senderId: agent.id,
             workspace: input.workspace ?? agent.workspace,
             recipientId: input.recipient_id,
@@ -254,7 +276,7 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
       }),
       handler: async (input) =>
         json({
-          message: store.replyMessage({
+          message: await store.replyMessage({
             senderId: agent.id,
             workspace: input.workspace ?? agent.workspace,
             messageId: input.message_id,
@@ -278,7 +300,7 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
       }),
       handler: async (input) =>
         json({
-          messages: store.inbox(agent.id, {
+          messages: await store.inbox(agent.id, {
             workspace: input.workspace ?? agent.workspace,
             unreadOnly: input.unread_only,
             includeSent: input.include_sent,
@@ -298,7 +320,7 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
       }),
       handler: async (input) =>
         json({
-          message: store.readMessage(agent.id, input.message_id, input.workspace ?? agent.workspace),
+          message: await store.readMessage(agent.id, input.message_id, input.workspace ?? agent.workspace),
         }),
     }),
     communicationTool({
@@ -313,7 +335,7 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
       }),
       handler: async (input) =>
         json({
-          messages: store.searchMessages(agent.id, {
+          messages: await store.searchMessages(agent.id, {
             workspace: input.workspace ?? agent.workspace,
             query: input.query,
             channel: input.channel,
@@ -331,7 +353,7 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
       }),
       handler: async (input) =>
         json({
-          threads: store.listThreads(agent.id, input.workspace ?? agent.workspace, input.limit),
+          threads: await store.listThreads(agent.id, input.workspace ?? agent.workspace, input.limit),
         }),
     }),
     communicationTool({
@@ -345,7 +367,7 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
       }),
       handler: async (input) =>
         json({
-          messages: store.getThread(
+          messages: await store.getThread(
             agent.id,
             input.thread_id,
             input.workspace ?? agent.workspace,
@@ -367,10 +389,10 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
         const timeoutMs = input.timeout_ms ?? 0;
         const intervalMs = input.interval_ms ?? 500;
         const deadline = Date.now() + timeoutMs;
-        let updates = store.updatesSince(agent.id, input.workspace ?? agent.workspace, input.since);
+        let updates = await store.updatesSince(agent.id, input.workspace ?? agent.workspace, input.since);
         while (!hasUpdates(updates) && Date.now() < deadline) {
           await sleep(Math.min(intervalMs, Math.max(0, deadline - Date.now())));
-          updates = store.updatesSince(agent.id, input.workspace ?? agent.workspace, input.since);
+          updates = await store.updatesSince(agent.id, input.workspace ?? agent.workspace, input.since);
         }
         return json({ updates });
       },
@@ -395,7 +417,7 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
       }),
       handler: async (input) =>
         json({
-          task: store.createTask({
+          task: await store.createTask({
             creatorId: agent.id,
             workspace: input.workspace ?? agent.workspace,
             title: input.title,
@@ -456,7 +478,7 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
           );
         }
 
-        const task = store.createTask({
+        const task = await store.createTask({
           creatorId: agent.id,
           workspace: input.workspace ?? agent.workspace,
           title: input.title,
@@ -472,7 +494,7 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
           artifacts: input.artifacts,
         });
         const notificationMessage = notificationRequested
-          ? store.sendMessage({
+          ? await store.sendMessage({
               senderId: agent.id,
               workspace: input.workspace ?? agent.workspace,
               recipientId: notificationRecipientId,
@@ -509,7 +531,7 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
       }),
       handler: async (input) =>
         json({
-          tasks: store.listTasks(agent.id, {
+          tasks: await store.listTasks(agent.id, {
             workspace: input.workspace ?? agent.workspace,
             status: input.status as TaskStatus | undefined,
             assigneeId: input.assignee_id,
@@ -532,7 +554,7 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
       }),
       handler: async (input) =>
         json({
-          task: store.claimTask(agent.id, input.task_id, input.note, input.workspace ?? agent.workspace),
+          task: await store.claimTask(agent.id, input.task_id, input.note, input.workspace ?? agent.workspace),
         }),
     }),
     communicationTool({
@@ -551,7 +573,7 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
       }),
       handler: async (input) =>
         json({
-          task: store.updateTask({
+          task: await store.updateTask({
             agentId: agent.id,
             workspace: input.workspace ?? agent.workspace,
             taskId: input.task_id,
@@ -562,7 +584,7 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
             blockedReason: input.blocked_reason,
             artifacts: input.artifacts,
           }),
-          events: store.listVisibleTaskEvents(
+          events: await store.listVisibleTaskEvents(
             agent.id,
             input.task_id,
             input.workspace ?? agent.workspace,
@@ -605,7 +627,7 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
         }
 
         const status = input.status ?? "done";
-        const task = store.updateTask({
+        const task = await store.updateTask({
           agentId: agent.id,
           workspace: input.workspace ?? agent.workspace,
           taskId: input.task_id,
@@ -616,7 +638,7 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
           blockedReason: input.blocked_reason,
           artifacts: input.artifacts,
         });
-        const events = store.listVisibleTaskEvents(
+        const events = await store.listVisibleTaskEvents(
           agent.id,
           input.task_id,
           input.workspace ?? agent.workspace,
@@ -626,7 +648,7 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
         for (const resource of input.release_locks ?? []) {
           try {
             releasedLocks.push(
-              store.releaseLock(agent.id, resource, input.workspace ?? agent.workspace),
+              await store.releaseLock(agent.id, resource, input.workspace ?? agent.workspace),
             );
           } catch (error) {
             releaseErrors.push({
@@ -644,7 +666,7 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
           (!handoffRecipientId ? task.channel ?? undefined : undefined);
         const handoffMessage =
           handoffRequested && (handoffRecipientId || handoffChannel)
-            ? store.sendMessage({
+            ? await store.sendMessage({
                 senderId: agent.id,
                 workspace: input.workspace ?? agent.workspace,
                 recipientId: handoffRecipientId,
@@ -689,7 +711,7 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
       }),
       handler: async (input) =>
         json({
-          note: store.writeNote({
+          note: await store.writeNote({
             agentId: agent.id,
             workspace: input.workspace ?? agent.workspace,
             noteId: input.note_id,
@@ -715,7 +737,7 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
       }),
       handler: async (input) =>
         json({
-          notes: store.readNotes({
+          notes: await store.readNotes({
             workspace: input.workspace ?? agent.workspace,
             channel: input.channel,
             pinnedOnly: input.pinned_only,
@@ -735,7 +757,7 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
       }),
       handler: async (input) =>
         json({
-          note: store.pinNote(input.note_id, input.pinned, input.workspace ?? agent.workspace),
+          note: await store.pinNote(input.note_id, input.pinned, input.workspace ?? agent.workspace),
         }),
     }),
     communicationTool({
@@ -748,8 +770,109 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
       }),
       handler: async (input) =>
         json({
-          summary: store.summarizeChannel(agent.id, input.workspace ?? agent.workspace, input.channel),
+          summary: await store.summarizeChannel(agent.id, input.workspace ?? agent.workspace, input.channel),
         }),
+    }),
+    communicationTool({
+      name: "upload_artifact",
+      description:
+        "Upload artifact content to configured S3 storage, attach it to a visible message, task, or note, and return the created artifact reference.",
+      inputSchema: z.object({
+        workspace: workspaceSchema,
+        owner_type: artifactOwnerSchema,
+        owner_id: z.string().min(1),
+        type: artifactTypeSchema.optional(),
+        label: z.string().min(1).optional(),
+        filename: z.string().min(1).optional(),
+        content_type: z.string().min(1).optional(),
+        content_text: z.string().optional(),
+        content_base64: z.string().optional(),
+        url: z.string().min(1).optional(),
+        metadata: metadataSchema,
+      }),
+      handler: async (input) => {
+        const workspace = workspaceName(input.workspace ?? agent.workspace);
+        await store.listVisibleArtifacts(agent.id, workspace, input.owner_type, input.owner_id);
+        const artifactId = crypto.randomUUID();
+        const artifactInput = await storage.artifactInputForUpload({
+          artifactId,
+          contentBase64: input.content_base64,
+          contentText: input.content_text,
+          contentType: input.content_type,
+          filename: input.filename,
+          label: input.label,
+          metadata: input.metadata,
+          ownerId: input.owner_id,
+          ownerType: input.owner_type,
+          permanentUrl: input.url,
+          type: input.type ?? "file",
+          workspace,
+        });
+        const artifact = await store.addVisibleArtifact(
+          agent.id,
+          workspace,
+          input.owner_type,
+          input.owner_id,
+          artifactInput,
+          artifactId,
+        );
+        return json({ artifact });
+      },
+    }),
+    communicationTool({
+      name: "read_artifact_content",
+      description:
+        "Read S3-backed artifact content for a visible message, task, or note. Text is returned by default; binary content can be returned as base64.",
+      inputSchema: z.object({
+        workspace: workspaceSchema,
+        owner_type: artifactOwnerSchema,
+        owner_id: z.string().min(1),
+        artifact_id: z.string().min(1),
+        encoding: artifactEncodingSchema.optional(),
+        max_bytes: z.number().int().min(1).max(MAX_ARTIFACT_READ_BYTES).optional(),
+      }),
+      handler: async (input) => {
+        const artifact = await store.getVisibleArtifact(
+          agent.id,
+          input.workspace ?? agent.workspace,
+          input.owner_type,
+          input.owner_id,
+          input.artifact_id,
+        );
+        return json({
+          artifact_content: await storage.read(artifact, {
+            encoding: input.encoding,
+            maxBytes: input.max_bytes,
+          }),
+        });
+      },
+    }),
+    communicationTool({
+      name: "presign_artifact",
+      description:
+        "Return a short-lived presigned download URL for S3-backed artifact content attached to a visible message, task, or note.",
+      inputSchema: z.object({
+        workspace: workspaceSchema,
+        owner_type: artifactOwnerSchema,
+        owner_id: z.string().min(1),
+        artifact_id: z.string().min(1),
+        expires_in_seconds: z.number().int().min(60).max(86_400).optional(),
+      }),
+      handler: async (input) => {
+        const artifact = await store.getVisibleArtifact(
+          agent.id,
+          input.workspace ?? agent.workspace,
+          input.owner_type,
+          input.owner_id,
+          input.artifact_id,
+        );
+        const expiresIn = input.expires_in_seconds ?? 900;
+        return json({
+          artifact,
+          expires_in_seconds: expiresIn,
+          url: storage.presign(artifact, expiresIn),
+        });
+      },
     }),
     communicationTool({
       name: "list_artifacts",
@@ -762,7 +885,7 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
       }),
       handler: async (input) =>
         json({
-          artifacts: store.listVisibleArtifacts(
+          artifacts: await store.listVisibleArtifacts(
             agent.id,
             input.workspace ?? agent.workspace,
             input.owner_type,
@@ -782,7 +905,7 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
       }),
       handler: async (input) =>
         json({
-          lock: store.acquireLock({
+          lock: await store.acquireLock({
             agentId: agent.id,
             workspace: input.workspace ?? agent.workspace,
             resource: input.resource,
@@ -801,7 +924,7 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
       }),
       handler: async (input) =>
         json({
-          lock: store.releaseLock(agent.id, input.resource, input.workspace ?? agent.workspace),
+          lock: await store.releaseLock(agent.id, input.resource, input.workspace ?? agent.workspace),
         }),
     }),
     communicationTool({
@@ -815,7 +938,7 @@ export function createCommunicationTools(store: LocalCommsStore, agent: AgentCon
       }),
       handler: async (input) =>
         json({
-          locks: store.listLocks({
+          locks: await store.listLocks({
             workspace: input.workspace ?? agent.workspace,
             resource: input.resource,
             includeExpired: input.include_expired,
