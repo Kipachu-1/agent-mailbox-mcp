@@ -1,0 +1,9 @@
+.git
+.DS_Store
+node_modules
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+coverage
+dist
+tmp
