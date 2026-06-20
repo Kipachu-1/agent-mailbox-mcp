@@ -16,6 +16,18 @@ test("defaultDbPath honors local comms override before home fallback", () => {
   );
 });
 
+test("defaultDbPath trims whitespace from LOCAL_AI_COMMS_DB and falls back to cwd when unset", () => {
+  // A whitespace-only override is treated as absent, so HOME should win when set.
+  expect(
+    defaultDbPath({ LOCAL_AI_COMMS_DB: "   ", HOME: "/Users/example" }),
+  ).toBe("/Users/example/.local/share/local-ai-comms.sqlite");
+
+  // A real override passes the trim check but is returned verbatim (not trimmed).
+  expect(defaultDbPath({ LOCAL_AI_COMMS_DB: "/tmp/mailbox.sqlite" })).toBe(
+    "/tmp/mailbox.sqlite",
+  );
+});
+
 test("readHttpTokens validates bootstrap token shape", () => {
   expect(() => readHttpTokens({ AGENT_MAILBOX_HTTP_TOKENS: "not-json" })).toThrow(
     /must be valid JSON/,
