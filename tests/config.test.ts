@@ -1,6 +1,8 @@
 import { expect, test } from "bun:test";
+import { join } from "node:path";
 import {
   defaultDbPath,
+  readAgentConfig,
   readHttpServerConfig,
   readHttpTokens,
   readS3StorageConfig,
@@ -14,6 +16,69 @@ test("defaultDbPath honors local comms override before home fallback", () => {
   expect(defaultDbPath({ HOME: "/Users/example" })).toBe(
     "/Users/example/.local/share/local-ai-comms.sqlite",
   );
+});
+
+test("defaultDbPath trims HOME and falls back through whitespace-only overrides", () => {
+  // Whitespace-only LOCAL_AI_COMMS_DB is treated as absent.
+  expect(defaultDbPath({ LOCAL_AI_COMMS_DB: "   ", HOME: "/Users/example" })).toBe(
+    "/Users/example/.local/share/local-ai-comms.sqlite",
+  );
+  // HOME is trimmed before use.
+  expect(defaultDbPath({ HOME: "  /Users/example  " })).toBe(
+    "/Users/example/.local/share/local-ai-comms.sqlite",
+  );
+});
+
+test("defaultDbPath falls back to cwd when HOME is missing or blank", () => {
+  const expected = join(process.cwd(), ".local", "share", "local-ai-comms.sqlite");
+  expect(defaultDbPath({})).toBe(expected);
+  expect(defaultDbPath({ HOME: "" })).toBe(expected);
+  expect(defaultDbPath({ HOME: "   " })).toBe(expected);
+});
+
+test("readAgentConfig requires LOCAL_AI_COMMS_AGENT_ID", () => {
+  expect(() => readAgentConfig({})).toThrow(/LOCAL_AI_COMMS_AGENT_ID is required/);
+  expect(() => readAgentConfig({ LOCAL_AI_COMMS_AGENT_ID: "   " })).toThrow(
+    /LOCAL_AI_COMMS_AGENT_ID is required/,
+  );
+});
+
+test("readAgentConfig falls back to id for name and trims whitespace", () => {
+  expect(readAgentConfig({ LOCAL_AI_COMMS_AGENT_ID: "  codex  " })).toEqual({
+    id: "codex",
+    name: "codex",
+    workspace: undefined,
+  });
+  expect(
+    readAgentConfig({
+      LOCAL_AI_COMMS_AGENT_ID: "codex",
+      LOCAL_AI_COMMS_AGENT_NAME: "  Codex Agent  ",
+    }),
+  ).toEqual({
+    id: "codex",
+    name: "Codex Agent",
+    workspace: undefined,
+  });
+});
+
+test("readAgentConfig exposes workspace when provided", () => {
+  expect(
+    readAgentConfig({
+      LOCAL_AI_COMMS_AGENT_ID: "codex",
+      LOCAL_AI_COMMS_WORKSPACE: "  repo-a  ",
+    }),
+  ).toEqual({
+    id: "codex",
+    name: "codex",
+    workspace: "repo-a",
+  });
+  // Whitespace-only workspace collapses to undefined.
+  expect(readAgentConfig({ LOCAL_AI_COMMS_AGENT_ID: "codex", LOCAL_AI_COMMS_WORKSPACE: "  " }))
+    .toEqual({
+      id: "codex",
+      name: "codex",
+      workspace: undefined,
+    });
 });
 
 test("readHttpTokens validates bootstrap token shape", () => {
