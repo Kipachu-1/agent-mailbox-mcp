@@ -1,12 +1,15 @@
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { readFileSync } from "node:fs";
 import { createArtifactStorage } from "./artifact-storage";
 import type { HttpServerConfig } from "./config";
 import { readHttpServerConfig } from "./config";
 import { createLocalCommsMcpServer } from "./mcp";
 import type { AccessKeyRecord } from "./store";
 import { createCommsStore } from "./store";
+
+const SERVER_VERSION = readPackageVersion();
 
 interface HttpSession {
   accessKeyId: string;
@@ -55,7 +58,7 @@ export async function startAgentMailboxHttpServer(
           s3_artifacts: artifactStorage.enabled,
           transport: "streamable-http",
           status: "ok",
-          version: "0.1.0",
+          version: SERVER_VERSION,
         });
       }
 
@@ -320,6 +323,17 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function readPackageVersion(): string {
+  try {
+    const pkg = JSON.parse(
+      readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+    ) as { version?: string };
+    return pkg.version?.trim() || "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
 }
 
 if (import.meta.main) {

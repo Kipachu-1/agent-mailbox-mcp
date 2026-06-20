@@ -33,11 +33,15 @@ test(
 
     const health = await fetch(`http://${server.host}:${server.port}/health`);
     expect(health.status).toBe(200);
-    expect(await health.json()).toMatchObject({
+    const healthBody = await health.json();
+    expect(healthBody).toMatchObject({
       name: "agent-mailbox",
       transport: "streamable-http",
       status: "ok",
     });
+    expect(healthBody.version).toBe(
+      (await Bun.file(new URL("../package.json", import.meta.url)).json()).version,
+    );
 
     const deniedOverview = await fetch(`http://${server.host}:${server.port}/api/overview`);
     expect(deniedOverview.status).toBe(401);
