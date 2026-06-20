@@ -9,6 +9,7 @@ import type { ArtifactStorage } from "./artifact-storage";
 import type { AgentConfig } from "./config";
 import { LocalCommsStore } from "./store";
 import { createCommunicationTools } from "./tools";
+import { VERSION } from "./version";
 
 type BeeAiToolRegistrar = (
   name: string,
@@ -28,7 +29,7 @@ export function createLocalCommsMcpServer(
   const server = new McpServer(
     {
       name: "agent-mailbox",
-      version: "0.1.0",
+      version: VERSION,
     },
     {
       instructions:

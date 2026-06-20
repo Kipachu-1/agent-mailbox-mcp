@@ -7,6 +7,7 @@ import { readHttpServerConfig } from "./config";
 import { createLocalCommsMcpServer } from "./mcp";
 import type { AccessKeyRecord } from "./store";
 import { createCommsStore } from "./store";
+import { VERSION } from "./version";
 
 interface HttpSession {
   accessKeyId: string;
@@ -55,7 +56,7 @@ export async function startAgentMailboxHttpServer(
           s3_artifacts: artifactStorage.enabled,
           transport: "streamable-http",
           status: "ok",
-          version: "0.1.0",
+          version: VERSION,
         });
       }
 

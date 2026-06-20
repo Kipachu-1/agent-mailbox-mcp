@@ -7,6 +7,7 @@ import { join } from "node:path";
 import type { HttpAgentTokenConfig } from "../src/config";
 import { startAgentMailboxHttpServer, type AgentMailboxHttpServer } from "../src/http";
 import type { AccessKeyRecord } from "../src/store";
+import { VERSION } from "../src/version";
 
 const tempDirs: string[] = [];
 const servers: AgentMailboxHttpServer[] = [];
@@ -37,6 +38,7 @@ test(
       name: "agent-mailbox",
       transport: "streamable-http",
       status: "ok",
+      version: VERSION,
     });
 
     const deniedOverview = await fetch(`http://${server.host}:${server.port}/api/overview`);

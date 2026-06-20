@@ -1,5 +1,7 @@
 {
   "name": "agent-mailbox-mcp",
+  "version": "0.1.0",
+  "license": "MIT",
   "module": "src/http.ts",
   "type": "module",
   "private": true,
