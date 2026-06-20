@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import {
   defaultDbPath,
+  readAgentConfig,
   readHttpServerConfig,
   readHttpTokens,
   readS3StorageConfig,
@@ -120,4 +121,26 @@ test("readHttpServerConfig rejects missing admin token and invalid ports", () =>
       AGENT_MAILBOX_HTTP_PORT: "70000",
     }),
   ).toThrow(/Invalid HTTP port/);
+});
+
+test("readAgentConfig requires an agent id and derives name and workspace", () => {
+  expect(() => readAgentConfig({})).toThrow(/LOCAL_AI_COMMS_AGENT_ID is required/);
+
+  expect(readAgentConfig({ LOCAL_AI_COMMS_AGENT_ID: "agent-a" })).toEqual({
+    id: "agent-a",
+    name: "agent-a",
+    workspace: undefined,
+  });
+
+  expect(
+    readAgentConfig({
+      LOCAL_AI_COMMS_AGENT_ID: "agent-a",
+      LOCAL_AI_COMMS_AGENT_NAME: "Agent Alpha",
+      LOCAL_AI_COMMS_WORKSPACE: "repo-a",
+    }),
+  ).toEqual({
+    id: "agent-a",
+    name: "Agent Alpha",
+    workspace: "repo-a",
+  });
 });
