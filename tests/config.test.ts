@@ -1,6 +1,8 @@
 import { expect, test } from "bun:test";
+import { join } from "node:path";
 import {
   defaultDbPath,
+  readAgentConfig,
   readHttpServerConfig,
   readHttpTokens,
   readS3StorageConfig,
@@ -13,6 +15,23 @@ test("defaultDbPath honors local comms override before home fallback", () => {
   );
   expect(defaultDbPath({ HOME: "/Users/example" })).toBe(
     "/Users/example/.local/share/local-ai-comms.sqlite",
+  );
+});
+
+test("defaultDbPath trims whitespace from LOCAL_AI_COMMS_DB and falls back to cwd when unset", () => {
+  // A whitespace-only override is treated as absent, so HOME should win when set.
+  expect(
+    defaultDbPath({ LOCAL_AI_COMMS_DB: "   ", HOME: "/Users/example" }),
+  ).toBe("/Users/example/.local/share/local-ai-comms.sqlite");
+
+  // A real override passes the trim check but is returned verbatim (not trimmed).
+  expect(defaultDbPath({ LOCAL_AI_COMMS_DB: "/tmp/mailbox.sqlite" })).toBe(
+    "/tmp/mailbox.sqlite",
+  );
+
+  // When neither LOCAL_AI_COMMS_DB nor HOME is set, fall back to the current working directory.
+  expect(defaultDbPath({})).toBe(
+    join(process.cwd(), ".local", "share", "local-ai-comms.sqlite"),
   );
 });
 
@@ -120,4 +139,46 @@ test("readHttpServerConfig rejects missing admin token and invalid ports", () =>
       AGENT_MAILBOX_HTTP_PORT: "70000",
     }),
   ).toThrow(/Invalid HTTP port/);
+});
+
+test("readAgentConfig requires an agent id and derives name and workspace", () => {
+  // Missing LOCAL_AI_COMMS_AGENT_ID throws.
+  expect(() => readAgentConfig({})).toThrow(/LOCAL_AI_COMMS_AGENT_ID is required/);
+  // A whitespace-only id also throws after trimming.
+  expect(() => readAgentConfig({ LOCAL_AI_COMMS_AGENT_ID: "   " })).toThrow(
+    /LOCAL_AI_COMMS_AGENT_ID is required/,
+  );
+
+  // Name falls back to the id when LOCAL_AI_COMMS_AGENT_NAME is unset.
+  expect(readAgentConfig({ LOCAL_AI_COMMS_AGENT_ID: "agent-a" })).toEqual({
+    id: "agent-a",
+    name: "agent-a",
+    workspace: undefined,
+  });
+
+  // Name and workspace are honoured when provided.
+  expect(
+    readAgentConfig({
+      LOCAL_AI_COMMS_AGENT_ID: "agent-a",
+      LOCAL_AI_COMMS_AGENT_NAME: "Agent Alpha",
+      LOCAL_AI_COMMS_WORKSPACE: "repo-a",
+    }),
+  ).toEqual({
+    id: "agent-a",
+    name: "Agent Alpha",
+    workspace: "repo-a",
+  });
+
+  // Whitespace-only name and workspace fall back (name to id, workspace to undefined).
+  expect(
+    readAgentConfig({
+      LOCAL_AI_COMMS_AGENT_ID: "agent-a",
+      LOCAL_AI_COMMS_AGENT_NAME: "  ",
+      LOCAL_AI_COMMS_WORKSPACE: "  ",
+    }),
+  ).toEqual({
+    id: "agent-a",
+    name: "agent-a",
+    workspace: undefined,
+  });
 });
