@@ -526,6 +526,7 @@ test("write_note create attaches artifacts as today (replace flag ignored)", asy
 test("watch updates only returns task events visible to the requesting agent", async () => {
   const { path } = tempDb();
   const store = await LocalCommsStore.openSqlite(path);
+  await store.registerAgent({ id: "claude", name: "Claude", workspace: "repo-a" });
   const since = new Date(Date.now() - 1000).toISOString();
 
   const task = await store.createTask({
@@ -551,6 +552,7 @@ test("watch updates only returns task events visible to the requesting agent", a
 test("task updates and artifacts require owner visibility", async () => {
   const { path } = tempDb();
   const store = await LocalCommsStore.openSqlite(path);
+  await store.registerAgent({ id: "claude", name: "Claude", workspace: "repo-a" });
 
   const message = await store.sendMessage({
     senderId: "codex",
@@ -805,6 +807,107 @@ test("update_task emits updated events for changed fields and status_changed for
   await store.close();
 });
 
+test("create_task rejects invalid assignee_id, parent_task_id, and dependencies", async () => {
+  const { path } = tempDb();
+  const store = await LocalCommsStore.openSqlite(path);
+  await store.registerAgent({ id: "codex", name: "Codex", workspace: "ws" });
+  await store.registerAgent({ id: "claude", name: "Claude", workspace: "ws" });
+
+  // Valid references are accepted.
+  const parent = await store.createTask({
+    creatorId: "codex",
+    workspace: "ws",
+    title: "Parent",
+  });
+  const dep = await store.createTask({
+    creatorId: "codex",
+    workspace: "ws",
+    title: "Dependency",
+  });
+  const valid = await store.createTask({
+    creatorId: "codex",
+    workspace: "ws",
+    title: "Valid task",
+    assigneeId: "claude",
+    parentTaskId: parent.id,
+    dependencies: [dep.id],
+  });
+  expect(valid.assignee_id).toBe("claude");
+  expect(valid.parent_task_id).toBe(parent.id);
+  expect(valid.dependencies).toEqual([dep.id]);
+
+  // assignee_id that does not resolve to an agent in the workspace is rejected.
+  await expect(
+    store.createTask({
+      creatorId: "codex",
+      workspace: "ws",
+      title: "Bad assignee",
+      assigneeId: "ghost",
+    }),
+  ).rejects.toThrow(/Invalid assignee_id 'ghost'/);
+
+  // assignee_id that exists in a different workspace is rejected.
+  await store.registerAgent({ id: "other-agent", name: "Other", workspace: "other-ws" });
+  await expect(
+    store.createTask({
+      creatorId: "codex",
+      workspace: "ws",
+      title: "Cross-workspace assignee",
+      assigneeId: "other-agent",
+    }),
+  ).rejects.toThrow(/Invalid assignee_id 'other-agent'/);
+
+  // parent_task_id that does not resolve to a task in the workspace is rejected.
+  await expect(
+    store.createTask({
+      creatorId: "codex",
+      workspace: "ws",
+      title: "Bad parent",
+      parentTaskId: "nonexistent",
+    }),
+  ).rejects.toThrow(/Invalid parent_task_id 'nonexistent'/);
+
+  // parent_task_id in a different workspace is rejected.
+  const otherWsTask = await store.createTask({
+    creatorId: "codex",
+    workspace: "other-ws",
+    title: "Other workspace task",
+  });
+  await expect(
+    store.createTask({
+      creatorId: "codex",
+      workspace: "ws",
+      title: "Cross-workspace parent",
+      parentTaskId: otherWsTask.id,
+    }),
+  ).rejects.toThrow(/Invalid parent_task_id/);
+
+  // dependency that does not resolve to a task in the workspace is rejected.
+  await expect(
+    store.createTask({
+      creatorId: "codex",
+      workspace: "ws",
+      title: "Bad dependency",
+      dependencies: ["ghost"],
+    }),
+  ).rejects.toThrow(/Invalid dependency 'ghost'/);
+
+  // dependency in a different workspace is rejected.
+  await expect(
+    store.createTask({
+      creatorId: "codex",
+      workspace: "ws",
+      title: "Cross-workspace dependency",
+      dependencies: [otherWsTask.id],
+    }),
+  ).rejects.toThrow(/Invalid dependency/);
+
+  // No partial task is left behind by a failed create.
+  expect((await store.listAllTasks({ workspace: "ws" })).length).toBe(3);
+
+  await store.close();
+});
+
 test("update_task rejects invalid assignee_id, parent_task_id, and self-parent", async () => {
   const { path } = tempDb();
   const store = await LocalCommsStore.openSqlite(path);
@@ -931,6 +1034,7 @@ test("update_task validates dependencies and avoids spurious events", async () =
 test("update_task enforces visibility and rejects empty title", async () => {
   const { path } = tempDb();
   const store = await LocalCommsStore.openSqlite(path);
+  await store.registerAgent({ id: "claude", name: "Claude", workspace: "repo-a" });
 
   const task = await store.createTask({
     creatorId: "codex",
