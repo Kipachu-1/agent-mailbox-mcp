@@ -242,6 +242,13 @@ export interface WriteNoteInput {
   pinned?: boolean;
   metadata?: unknown;
   artifacts?: ArtifactInput[];
+  /**
+   * When updating an existing note, controls how `artifacts` are applied.
+   * Defaults to `false` (append): passed artifacts are added to the note's
+   * existing ones, and existing ones are preserved. Set to `true` to fully
+   * replace the note's artifact set. Ignored when creating a new note.
+   */
+  replaceArtifacts?: boolean;
 }
 
 export interface ReadNotesOptions {

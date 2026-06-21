@@ -1,4 +1,4 @@
-import { listArtifacts, replaceArtifacts } from "./artifacts";
+import { appendArtifacts, listArtifacts, replaceArtifacts } from "./artifacts";
 import { caseInsensitiveLike, type StoreContext, type StoreValue } from "./context";
 import {
   emptyToNull,
@@ -47,7 +47,16 @@ export async function writeNote(ctx: StoreContext, input: WriteNoteInput): Promi
         now,
       ],
     );
-    await replaceArtifacts(tx, "note", id, input.artifacts ?? []);
+    const incoming = input.artifacts ?? [];
+    if (existing && input.replaceArtifacts !== true) {
+      // Update defaults to append: preserve existing artifacts and add new
+      // ones, deduplicated by identity. Callers that want full replace must
+      // opt in with replaceArtifacts: true.
+      await appendArtifacts(tx, "note", id, incoming);
+    } else {
+      // Create, or explicit full-replace on update.
+      await replaceArtifacts(tx, "note", id, incoming);
+    }
   });
 
   const note = await getNote(ctx, id);
