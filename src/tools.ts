@@ -733,7 +733,7 @@ export function createCommunicationTools(
     communicationTool({
       name: "list_task_events",
       description:
-        "Read a task's audit event log (creation, status changes, updates, claims, blocks) without mutating the task. Use this to reason about a task's history and progress instead of relying on update_task or finish_work side effects. Events are ordered oldest-first (created_at ascending); use offset and limit to page through long histories; total and has_more describe the full event set for the task. Only events for tasks visible to the current agent are returned; a non-existent or invisible task returns an error.",
+        "Read a task's audit event log (creation, claims, status changes, and field updates) without mutating the task. Use this to reason about a task's history and progress instead of relying on update_task or finish_work side effects. Events are ordered oldest-first (created_at ascending); use offset and limit to page through long histories; total and has_more describe the full event set for the task. Only events for tasks visible to the current agent are returned; a non-existent or invisible task returns an error.",
       inputSchema: z.object({
         workspace: workspaceSchema,
         task_id: z.string().min(1),

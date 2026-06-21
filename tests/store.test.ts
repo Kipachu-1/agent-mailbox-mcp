@@ -1080,6 +1080,60 @@ test("listVisibleTaskEventsPage paginates events oldest-first and enforces visib
   await store.close();
 });
 
+test("listVisibleTaskEventsPage pagination is stable across same-timestamp events", async () => {
+  const { path } = tempDb();
+  const store = await LocalCommsStore.openSqlite(path);
+
+  // A single updateTask that changes BOTH status and a field inserts
+  // status_changed + updated in one transaction. These routinely share the
+  // same ms-precision created_at (the tiebreaker review finding), which must
+  // not cause rows to be skipped or duplicated across LIMIT/OFFSET pages.
+  const task = await store.createTask({
+    creatorId: "codex",
+    workspace: "repo-b",
+    title: "Tiebreaker task",
+  });
+  await store.updateTask({
+    agentId: "codex",
+    workspace: "repo-b",
+    taskId: task.id,
+    status: "done",
+    title: "Renamed",
+    note: "status + field in one update",
+  });
+
+  const allEvents = await store.listVisibleTaskEvents("codex", task.id, "repo-b");
+  expect(allEvents.map((e) => e.event_type)).toEqual(["created", "status_changed", "updated"]);
+
+  // If the two same-ms events tied, confirm the tie exists (this guards the
+  // scenario; the pagination assertion below holds regardless).
+  const hasTie = allEvents.some(
+    (e, i) => i > 0 && e.created_at === allEvents[i - 1]!.created_at,
+  );
+  expect(hasTie).toBe(true);
+
+  // Walk the full set one row at a time. With a stable tiebreaker (id ASC),
+  // every event appears exactly once across pages — no skips, no duplicates.
+  const seen: string[] = [];
+  let off = 0;
+  for (;;) {
+    const page = await store.listVisibleTaskEventsPage("codex", task.id, {
+      workspace: "repo-b",
+      limit: 1,
+      offset: off,
+    });
+    for (const e of page.results) seen.push(e.id);
+    if (!page.has_more) break;
+    off += 1;
+  }
+  expect(seen).toHaveLength(allEvents.length);
+  expect(new Set(seen).size).toBe(allEvents.length);
+  // Page-by-page order matches the single-query order.
+  expect(seen).toEqual(allEvents.map((e) => e.id));
+
+  await store.close();
+});
+
 function tempDb(): { dir: string; path: string } {
   const dir = mkdtempSync(join(tmpdir(), "agent-mailbox-"));
   tempDirs.push(dir);
