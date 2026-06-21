@@ -224,8 +224,14 @@ export interface UpdateTaskInput {
   agentId: string;
   workspace?: string;
   taskId: string;
-  status: TaskStatus;
+  status?: TaskStatus;
   note?: string;
+  title?: string;
+  description?: string;
+  assigneeId?: string | null;
+  channel?: string | null;
+  parentTaskId?: string | null;
+  dependencies?: string[];
   priority?: number;
   dueAt?: string | null;
   blockedReason?: string | null;

@@ -244,7 +244,7 @@ Stale claimed tasks are reclaim candidates only after checking recent presence a
 - `create_handoff`: create a task and optional notification message in one workflow call.
 - `list_tasks`: list visible tasks. Use `stale_after_seconds` to find claimed tasks that have not changed recently.
 - `claim_task`: atomically claim an open task in the current workspace.
-- `update_task`: update status and workflow fields, with optional completion artifacts. `done`, `blocked`, and `cancelled` updates from another agent automatically notify the creator.
+- `update_task`: update status and editable fields (title, description, assignee_id, channel, parent_task_id, dependencies, priority, due_at, blocked_reason, status, artifacts) with partial-update semantics. Omitted fields are left unchanged; `null` clears nullable fields. Use `assignee_id` to directly assign or reassign a task. `done`, `blocked`, and `cancelled` updates from another agent automatically notify the creator.
 - `finish_work`: update a task, optionally send a final handoff note, and release selected locks in one cleanup call.
 
 ### Notes, Artifacts, and Locks

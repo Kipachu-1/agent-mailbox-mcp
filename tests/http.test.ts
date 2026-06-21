@@ -412,6 +412,91 @@ test("streamable HTTP can bootstrap access keys from environment-compatible conf
   }
 });
 
+test("update_task edits editable fields end-to-end over MCP", async () => {
+  const server = await startTestServer();
+
+  const agentAKey = await createAccessKey(server, {
+    name: "Agent A token",
+    agent_id: "agent-a",
+    agent_name: "Agent A",
+    workspace: "fullstack",
+  });
+  const agentBKey = await createAccessKey(server, {
+    name: "Agent B token",
+    agent_id: "agent-b",
+    agent_name: "Agent B",
+    workspace: "fullstack",
+  });
+
+  const agentA = createHttpClient(server.url, agentAKey.token, "agent-a-client");
+  const agentB = createHttpClient(server.url, agentBKey.token, "agent-b-client");
+  try {
+    await agentA.client.connect(agentA.transport);
+    await agentB.client.connect(agentB.transport);
+
+    // Register both agents so assignee_id validation can resolve them.
+    await agentA.client.callTool({ name: "register_agent", arguments: {} });
+    await agentB.client.callTool({ name: "register_agent", arguments: {} });
+
+    const created = await agentA.client.callTool({
+      name: "create_task",
+      arguments: {
+        title: "Original title",
+        description: "Original description",
+        channel: "docs",
+      },
+    });
+    expect(created.isError).not.toBe(true);
+    const task = (created.structuredContent as { task: { id: string } }).task;
+
+    // Partial update: edit title, description, assign directly to agent-b, move channel.
+    const updated = await agentA.client.callTool({
+      name: "update_task",
+      arguments: {
+        task_id: task.id,
+        title: "Corrected title",
+        description: "Revised description",
+        assignee_id: "agent-b",
+        channel: "backend",
+      },
+    });
+    expect(updated.isError).not.toBe(true);
+    const updatedTask = (updated.structuredContent as { task: Record<string, unknown> }).task;
+    expect(updatedTask.title).toBe("Corrected title");
+    expect(updatedTask.description).toBe("Revised description");
+    expect(updatedTask.assignee_id).toBe("agent-b");
+    expect(updatedTask.channel).toBe("backend");
+    expect(updatedTask.status).toBe("open");
+    // An `updated` event was emitted for the changed fields.
+    expect(JSON.stringify(updated.structuredContent)).toContain('"updated"');
+
+    // Invalid assignee_id returns a clear error (no silent no-op).
+    const invalid = await agentA.client.callTool({
+      name: "update_task",
+      arguments: { task_id: task.id, assignee_id: "ghost" },
+    });
+    expect(invalid.isError).toBe(true);
+    expect(JSON.stringify(invalid.content)).toContain("Invalid assignee_id");
+
+    // The failed update did not mutate the task.
+    const listed = await agentA.client.callTool({
+      name: "list_tasks",
+      arguments: { status: "open" },
+    });
+    expect(JSON.stringify(listed.structuredContent)).toContain("Corrected title");
+    expect(JSON.stringify(listed.structuredContent)).not.toContain('"assignee_id":"ghost"');
+  } finally {
+    if (agentA.transport.sessionId) {
+      await agentA.transport.terminateSession();
+    }
+    if (agentB.transport.sessionId) {
+      await agentB.transport.terminateSession();
+    }
+    await agentA.client.close();
+    await agentB.client.close();
+  }
+});
+
 async function startTestServer(tokens: HttpAgentTokenConfig[] = []): Promise<AgentMailboxHttpServer> {
   const dir = mkdtempSync(join(tmpdir(), "agent-mailbox-http-"));
   tempDirs.push(dir);

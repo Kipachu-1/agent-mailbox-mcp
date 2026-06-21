@@ -178,6 +178,16 @@ function jsonResource(uri: string, value: unknown) {
 }
 
 function errorMessage(error: unknown): string {
+  if (error instanceof AggregateError) {
+    // beeai-framework wraps tool handler errors in a generic ToolError
+    // (FrameworkError extends AggregateError). Surface the root cause so
+    // callers get the actionable message (e.g. "Invalid assignee_id ...")
+    // instead of "Tool 'update_task' has occurred an error!".
+    const cause = error.errors?.[0];
+    if (cause instanceof Error && cause.message) {
+      return errorMessage(cause);
+    }
+  }
   if (error instanceof Error) {
     return error.message;
   }
