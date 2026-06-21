@@ -544,6 +544,28 @@ export function createCommunicationTools(
         }),
     }),
     communicationTool({
+      name: "get_task",
+      description:
+        "Fetch a single visible task by ID with its artifacts, dependency IDs, and recent audit events in one read-only call. Returns the same { task, events } shape as update_task and finish_work, so a known task ID can be inspected without list_tasks round trips. Visibility follows the workspace scoping of the caller's access token: a task is returned only when the caller is its creator, its assignee, an assignee-less open task, or a member of the task's channel, all within the caller's workspace. If the task does not exist or is not visible to the caller, a not-found error is returned and no task data leaks across workspaces. No audit or progress events are written; this is a pure read.",
+      inputSchema: z.object({
+        workspace: workspaceSchema,
+        task_id: z.string().min(1),
+      }),
+      handler: async (input) => {
+        const workspace = input.workspace ?? agent.workspace;
+        const task = await store.getVisibleTask(agent.id, input.task_id, workspace);
+        if (!task) {
+          throw new Error(
+            `Task '${input.task_id}' is not visible to agent '${agent.id}'.`,
+          );
+        }
+        return json({
+          task,
+          events: await store.listVisibleTaskEvents(agent.id, input.task_id, workspace),
+        });
+      },
+    }),
+    communicationTool({
       name: "claim_task",
       description:
         "Atomically claim an open task for the current agent. Claim only work you intend to start now, and follow with heartbeat during long-running work.",

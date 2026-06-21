@@ -243,6 +243,7 @@ Stale claimed tasks are reclaim candidates only after checking recent presence a
 - `create_task`: create a claimable handoff task with clear acceptance criteria and artifacts.
 - `create_handoff`: create a task and optional notification message in one workflow call.
 - `list_tasks`: list visible tasks. Use `stale_after_seconds` to find claimed tasks that have not changed recently.
+- `get_task`: fetch a single visible task by ID with its artifacts, dependencies, and recent events in one read-only call.
 - `claim_task`: atomically claim an open task in the current workspace.
 - `update_task`: update status and workflow fields, with optional completion artifacts. `done`, `blocked`, and `cancelled` updates from another agent automatically notify the creator.
 - `finish_work`: update a task, optionally send a final handoff note, and release selected locks in one cleanup call.

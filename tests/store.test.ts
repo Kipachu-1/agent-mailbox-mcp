@@ -119,6 +119,44 @@ test("task updates append audit events", async () => {
   await store.close();
 });
 
+test("getVisibleTask returns a visible task with relations and 404s across workspaces", async () => {
+  const { path } = tempDb();
+  const store = await LocalCommsStore.openSqlite(path);
+
+  const dependency = await store.createTask({
+    creatorId: "codex",
+    workspace: "repo-a",
+    title: "Blocking work",
+    channel: "handoffs",
+  });
+  const task = await store.createTask({
+    creatorId: "codex",
+    workspace: "repo-a",
+    title: "Dependent work",
+    channel: "handoffs",
+    assigneeId: "claude",
+    dependencies: [dependency.id],
+    artifacts: [{ type: "file", path: "/tmp/spec.md", label: "spec" }],
+  });
+
+  // Creator sees the task with its relations.
+  const visible = await store.getVisibleTask("codex", task.id, "repo-a");
+  expect(visible?.id).toBe(task.id);
+  expect(visible?.dependencies).toEqual([dependency.id]);
+  expect(visible?.artifacts.map((artifact) => artifact.path)).toContain("/tmp/spec.md");
+
+  // Assignee also sees it.
+  expect((await store.getVisibleTask("claude", task.id, "repo-a"))?.id).toBe(task.id);
+
+  // A missing task returns null.
+  expect(await store.getVisibleTask("codex", "does-not-exist", "repo-a")).toBeNull();
+
+  // The same task is not visible from a different workspace.
+  expect(await store.getVisibleTask("codex", task.id, "repo-b")).toBeNull();
+
+  await store.close();
+});
+
 test("presence and workspace scoping isolate agents and messages", async () => {
   const { path } = tempDb();
   const store = await LocalCommsStore.openSqlite(path);
