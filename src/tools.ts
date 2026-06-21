@@ -698,7 +698,7 @@ export function createCommunicationTools(
     communicationTool({
       name: "write_note",
       description:
-        "Write or update a shared scratchpad note in a workspace or channel. Pin durable conventions, ownership rules, and project context that every agent should see.",
+        "Write or update a shared scratchpad note in a workspace or channel. Pin durable conventions, ownership rules, and project context that every agent should see. When updating an existing note, artifacts default to APPEND: newly passed artifacts are added to the note's existing ones, and existing attachments are preserved unless you set replace_artifacts=true. Re-passing an artifact that is already attached is a no-op. Gotcha: if you want your `artifacts` argument to fully overwrite the note's attachments on update, you must pass replace_artifacts=true; otherwise anything you omit is kept.",
       inputSchema: z.object({
         workspace: workspaceSchema,
         note_id: z.string().min(1).optional(),
@@ -708,6 +708,12 @@ export function createCommunicationTools(
         pinned: z.boolean().optional(),
         metadata: metadataSchema,
         artifacts: z.array(artifactSchema).optional(),
+        replace_artifacts: z
+          .boolean()
+          .optional()
+          .describe(
+            "Only affects updates of an existing note. Default false (append): passed artifacts are added to existing ones and existing attachments are kept. Set true to fully replace the note's artifact set with the passed `artifacts`. Ignored when creating a new note.",
+          ),
       }),
       handler: async (input) =>
         json({
@@ -721,6 +727,7 @@ export function createCommunicationTools(
             pinned: input.pinned,
             metadata: input.metadata,
             artifacts: input.artifacts,
+            replaceArtifacts: input.replace_artifacts,
           }),
         }),
     }),

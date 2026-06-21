@@ -88,6 +88,45 @@ export async function insertArtifacts(
   }
 }
 
+/**
+ * Append `artifacts` to an owner's existing set, skipping any whose identity
+ * already matches an attached artifact (idempotent). Existing artifacts are
+ * always preserved. Identity is type + path + url + line, so re-passing the
+ * same reference twice is a no-op.
+ */
+export async function appendArtifacts(
+  ctx: Pick<StoreContext, "get" | "run" | "all">,
+  ownerType: ArtifactOwnerType,
+  ownerId: string,
+  artifacts: ArtifactInput[],
+): Promise<void> {
+  if (artifacts.length === 0) return;
+  const existing = await listArtifacts(ctx, ownerType, ownerId);
+  const seen = new Set(existing.map(artifactIdentityKey));
+  for (const artifact of artifacts) {
+    const key = artifactIdentityKey(artifact);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    await insertArtifact(ctx, ownerType, ownerId, artifact);
+  }
+}
+
+/**
+ * Identity key for deduplication. Two artifacts are considered the same
+ * reference when they share type, path, url, and line. Label and metadata
+ * are descriptive, not identity. Note: sparse artifacts that omit path,
+ * url, and line (e.g. type `other` with only a label) collapse to the same
+ * key, so at most one such artifact per type is kept on append.
+ */
+export function artifactIdentityKey(artifact: {
+  type: string;
+  path?: string | null;
+  url?: string | null;
+  line?: number | null;
+}): string {
+  return [artifact.type, artifact.path ?? "", artifact.url ?? "", artifact.line ?? ""].join("\u0000");
+}
+
 export async function insertArtifact(
   ctx: Pick<StoreContext, "run" | "get">,
   ownerType: ArtifactOwnerType,

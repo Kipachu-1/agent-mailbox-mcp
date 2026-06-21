@@ -385,6 +385,144 @@ test("notes cannot be overwritten or pinned across workspaces", async () => {
   await store.close();
 });
 
+test("write_note update preserves artifacts by default and appends new ones", async () => {
+  const { path } = tempDb();
+  const store = await LocalCommsStore.openSqlite(path);
+
+  const note = await store.writeNote({
+    agentId: "codex",
+    channel: "docs",
+    title: "Conventions",
+    body: "Keep examples current.",
+    artifacts: [{ type: "url", url: "https://example.com/spec", label: "spec" }],
+  });
+  expect(note.artifacts.map((a) => a.url)).toEqual(["https://example.com/spec"]);
+
+  // Update the title without re-passing artifacts: existing artifact is kept.
+  const updated = await store.writeNote({
+    agentId: "codex",
+    noteId: note.id,
+    title: "Conventions (v2)",
+    body: "Keep examples current.",
+  });
+  expect(updated.title).toBe("Conventions (v2)");
+  expect(updated.artifacts.map((a) => a.url)).toEqual(["https://example.com/spec"]);
+
+  // Append a new artifact by default; existing one is preserved.
+  const appended = await store.writeNote({
+    agentId: "codex",
+    noteId: note.id,
+    title: "Conventions (v2)",
+    body: "Keep examples current.",
+    artifacts: [{ type: "file", path: "/tmp/README.md", label: "readme" }],
+  });
+  expect(appended.artifacts.map((a) => a.url ?? a.path).sort()).toEqual([
+    "/tmp/README.md",
+    "https://example.com/spec",
+  ]);
+
+  await store.close();
+});
+
+test("write_note append is idempotent by artifact identity", async () => {
+  const { path } = tempDb();
+  const store = await LocalCommsStore.openSqlite(path);
+
+  const note = await store.writeNote({
+    agentId: "codex",
+    title: "Links",
+    body: "Reference list.",
+    artifacts: [{ type: "url", url: "https://example.com/a", label: "a" }],
+  });
+
+  // Re-passing the same reference does not create a duplicate.
+  const reappended = await store.writeNote({
+    agentId: "codex",
+    noteId: note.id,
+    title: "Links",
+    body: "Reference list.",
+    artifacts: [{ type: "url", url: "https://example.com/a", label: "a (again)" }],
+  });
+  expect(reappended.artifacts).toHaveLength(1);
+  expect(reappended.artifacts[0]?.url).toBe("https://example.com/a");
+
+  // A different identity is added; the same one is still deduped.
+  const mixed = await store.writeNote({
+    agentId: "codex",
+    noteId: note.id,
+    title: "Links",
+    body: "Reference list.",
+    artifacts: [
+      { type: "url", url: "https://example.com/a", label: "a" },
+      { type: "url", url: "https://example.com/b", label: "b" },
+    ],
+  });
+  expect(mixed.artifacts.map((a) => a.url).sort()).toEqual([
+    "https://example.com/a",
+    "https://example.com/b",
+  ]);
+
+  await store.close();
+});
+
+test("write_note replace_artifacts fully overwrites the artifact set on update", async () => {
+  const { path } = tempDb();
+  const store = await LocalCommsStore.openSqlite(path);
+
+  const note = await store.writeNote({
+    agentId: "codex",
+    title: "Files",
+    body: "Tracked files.",
+    artifacts: [
+      { type: "file", path: "/tmp/old.ts", label: "old" },
+      { type: "file", path: "/tmp/keep.ts", label: "keep" },
+    ],
+  });
+  expect(note.artifacts.map((a) => a.path).sort()).toEqual(["/tmp/keep.ts", "/tmp/old.ts"]);
+
+  const replaced = await store.writeNote({
+    agentId: "codex",
+    noteId: note.id,
+    title: "Files",
+    body: "Tracked files.",
+    artifacts: [{ type: "file", path: "/tmp/new.ts", label: "new" }],
+    replaceArtifacts: true,
+  });
+  expect(replaced.artifacts.map((a) => a.path)).toEqual(["/tmp/new.ts"]);
+  // Old artifacts are gone.
+  expect(replaced.artifacts.map((a) => a.path)).not.toContain("/tmp/old.ts");
+
+  // replaceArtifacts: true with an empty set clears all artifacts.
+  const cleared = await store.writeNote({
+    agentId: "codex",
+    noteId: note.id,
+    title: "Files",
+    body: "Tracked files.",
+    artifacts: [],
+    replaceArtifacts: true,
+  });
+  expect(cleared.artifacts).toEqual([]);
+
+  await store.close();
+});
+
+test("write_note create attaches artifacts as today (replace flag ignored)", async () => {
+  const { path } = tempDb();
+  const store = await LocalCommsStore.openSqlite(path);
+
+  const note = await store.writeNote({
+    agentId: "codex",
+    title: "Fresh",
+    body: "Brand new note.",
+    artifacts: [{ type: "url", url: "https://example.com/spec", label: "spec" }],
+    // replaceArtifacts has no effect on create.
+    replaceArtifacts: true,
+  });
+  expect(note.artifacts.map((a) => a.url)).toEqual(["https://example.com/spec"]);
+
+  await store.close();
+});
+
 test("watch updates only returns task events visible to the requesting agent", async () => {
   const { path } = tempDb();
   const store = await LocalCommsStore.openSqlite(path);
