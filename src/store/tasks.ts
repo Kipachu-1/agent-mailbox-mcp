@@ -24,6 +24,7 @@ import {
 } from "./task-support";
 import type {
   CreateTaskInput,
+  ListTaskEventsOptions,
   ListTasksOptions,
   Paginated,
   TaskEventRecord,
@@ -392,6 +393,33 @@ export async function listVisibleTaskEvents(
     throw new Error(`Task '${taskId}' is not visible to agent '${agentId}'.`);
   }
   return listTaskEvents(ctx, taskId);
+}
+
+export async function listVisibleTaskEventsPaginated(
+  ctx: StoreContext,
+  agentId: string,
+  taskId: string,
+  options: ListTaskEventsOptions = {},
+): Promise<Paginated<TaskEventRecord>> {
+  const scope = workspaceOf(options.workspace);
+  const task = await getVisibleTaskForAgent(ctx, agentId, taskId, scope);
+  if (!task) {
+    throw new Error(`Task '${taskId}' is not visible to agent '${agentId}'.`);
+  }
+  const offsetValue = offset(options.offset);
+  const limitValue = limit(options.limit);
+  const [rows, totalRow] = await Promise.all([
+    ctx.all<TaskEventRecord>(
+      `SELECT * FROM task_events WHERE task_id = ? ORDER BY created_at ASC LIMIT ? OFFSET ?`,
+      [taskId, limitValue, offsetValue],
+    ),
+    ctx.get<{ c: number }>(
+      `SELECT COUNT(*) AS c FROM task_events WHERE task_id = ?`,
+      [taskId],
+    ),
+  ]);
+  const total = Number(totalRow?.c ?? 0);
+  return { results: rows, total, has_more: hasMore(offsetValue, rows.length, total) };
 }
 
 export async function getTask(ctx: StoreContext, taskId: string): Promise<TaskRecord | null> {

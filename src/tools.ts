@@ -753,6 +753,25 @@ export function createCommunicationTools(
       },
     }),
     communicationTool({
+      name: "list_task_events",
+      description:
+        "Read a task's audit event log (creation, status changes, updates, claims, blocks) without mutating the task. Use this to reason about a task's history and progress instead of relying on update_task or finish_work side effects. Events are ordered oldest-first (created_at ascending); use offset and limit to page through long histories; total and has_more describe the full event set for the task. Only events for tasks visible to the current agent are returned; a non-existent or invisible task returns an error.",
+      inputSchema: z.object({
+        workspace: workspaceSchema,
+        task_id: z.string().min(1),
+        limit: z.number().int().min(1).max(200).optional(),
+        offset: z.number().int().min(0).optional(),
+      }),
+      handler: async (input) => {
+        const page = await store.listVisibleTaskEventsPage(agent.id, input.task_id, {
+          workspace: input.workspace ?? agent.workspace,
+          limit: input.limit,
+          offset: input.offset,
+        });
+        return json({ events: page.results, total: page.total, has_more: page.has_more });
+      },
+    }),
+    communicationTool({
       name: "write_note",
       description:
         "Write or update a shared scratchpad note in a workspace or channel. Pin durable conventions, ownership rules, and project context that every agent should see. When updating an existing note, artifacts default to APPEND: newly passed artifacts are added to the note's existing ones, and existing attachments are preserved unless you set replace_artifacts=true. Re-passing an artifact that is already attached is a no-op. Gotcha: if you want your `artifacts` argument to fully overwrite the note's attachments on update, you must pass replace_artifacts=true; otherwise anything you omit is kept.",

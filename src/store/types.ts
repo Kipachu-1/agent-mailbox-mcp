@@ -235,6 +235,12 @@ export interface ListTasksOptions {
   offset?: number;
 }
 
+export interface ListTaskEventsOptions {
+  workspace?: string;
+  limit?: number;
+  offset?: number;
+}
+
 export interface UpdateTaskInput {
   agentId: string;
   workspace?: string;
