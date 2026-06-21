@@ -718,6 +718,78 @@ test("update_task rejects invalid assignee_id, parent_task_id, and self-parent",
   await store.close();
 });
 
+test("update_task validates dependencies and avoids spurious events", async () => {
+  const { path } = tempDb();
+  const store = await LocalCommsStore.openSqlite(path);
+  await store.registerAgent({ id: "codex", name: "Codex", workspace: "ws" });
+
+  const dep = await store.createTask({ creatorId: "codex", workspace: "ws", title: "Dependency" });
+  const task = await store.createTask({ creatorId: "codex", workspace: "ws", title: "Task" });
+
+  // Unknown dependency id is rejected (no silent drop).
+  await expect(
+    store.updateTask({
+      agentId: "codex",
+      workspace: "ws",
+      taskId: task.id,
+      dependencies: ["ghost"],
+    }),
+  ).rejects.toThrow(/Invalid dependency 'ghost'/);
+
+  // Self-dependency is rejected.
+  await expect(
+    store.updateTask({
+      agentId: "codex",
+      workspace: "ws",
+      taskId: task.id,
+      dependencies: [task.id],
+    }),
+  ).rejects.toThrow(/cannot depend on itself/);
+
+  // Dependency in a different workspace is rejected.
+  const otherWsDep = await store.createTask({
+    creatorId: "codex",
+    workspace: "other-ws",
+    title: "Other workspace dep",
+  });
+  await expect(
+    store.updateTask({
+      agentId: "codex",
+      workspace: "ws",
+      taskId: task.id,
+      dependencies: [otherWsDep.id],
+    }),
+  ).rejects.toThrow(/Invalid dependency/);
+
+  // Valid dependency set is applied and emits an `updated` event.
+  await store.updateTask({
+    agentId: "codex",
+    workspace: "ws",
+    taskId: task.id,
+    dependencies: [dep.id],
+  });
+  let events = await store.listVisibleTaskEvents("codex", task.id, "ws");
+  expect(events.map((e) => e.event_type)).toEqual(["created", "updated"]);
+  expect(events.at(-1)?.note).toContain("dependencies");
+
+  // Re-setting the same dependency set does NOT emit a spurious event.
+  await store.updateTask({
+    agentId: "codex",
+    workspace: "ws",
+    taskId: task.id,
+    dependencies: [dep.id],
+    note: "no-op deps",
+  });
+  events = await store.listVisibleTaskEvents("codex", task.id, "ws");
+  // The only new event should be a note-only `updated` (no `dependencies` field
+  // flagged because the set is unchanged).
+  const lastEvent = events.at(-1);
+  expect(lastEvent?.event_type).toBe("updated");
+  expect(lastEvent?.note).toBe("no-op deps");
+
+  await store.close();
+});
+
 test("update_task enforces visibility and rejects empty title", async () => {
   const { path } = tempDb();
   const store = await LocalCommsStore.openSqlite(path);

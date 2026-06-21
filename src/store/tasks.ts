@@ -1,5 +1,5 @@
-import { insertArtifacts, listArtifacts } from "./artifacts";
 import { getAgent } from "./agents";
+import { insertArtifacts, listArtifacts } from "./artifacts";
 import { visibleTaskClause } from "./context";
 import type { StoreContext, StoreValue } from "./context";
 import {
@@ -200,6 +200,9 @@ export async function updateTask(ctx: StoreContext, input: UpdateTaskInput): Pro
 
     const status = input.status ?? existing.status;
     const priority = input.priority ?? existing.priority;
+    // Non-nullable fields use `??` (omit keeps existing); nullable-clearable
+    // fields use `=== undefined ? : emptyToNull()` so an explicit null clears
+    // the value while an omit leaves it unchanged.
     const dueAt = input.dueAt === undefined ? existing.due_at : emptyToNull(input.dueAt);
     const blockedReason =
       input.blockedReason === undefined ? existing.blocked_reason : emptyToNull(input.blockedReason);
@@ -260,8 +263,25 @@ export async function updateTask(ctx: StoreContext, input: UpdateTaskInput): Pro
       changedFields.push("blocked_reason");
     }
     if (input.dependencies !== undefined) {
+      // Validate each dependency references an existing task in the same
+      // workspace before replacing — no silent no-op on unknown ids.
+      for (const depId of input.dependencies.filter(Boolean)) {
+        if (depId === input.taskId) {
+          throw new Error(`Invalid dependency '${depId}': a task cannot depend on itself.`);
+        }
+        const dep = await getTask(tx, depId);
+        if (!dep || dep.workspace !== scope) {
+          throw new Error(
+            `Invalid dependency '${depId}': no task with that id exists in workspace '${scope}'.`,
+          );
+        }
+      }
+      const newDeps = input.dependencies.filter(Boolean).sort();
+      const oldDeps = [...existing.dependencies].sort();
       await replaceTaskDependencies(tx, input.taskId, input.dependencies);
-      changedFields.push("dependencies");
+      if (JSON.stringify(newDeps) !== JSON.stringify(oldDeps)) {
+        changedFields.push("dependencies");
+      }
     }
 
     const statusChanged = existing.status !== status;
