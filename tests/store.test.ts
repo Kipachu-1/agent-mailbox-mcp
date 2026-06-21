@@ -692,6 +692,271 @@ test("claim_task respects workspace scope when provided", async () => {
   await store.close();
 });
 
+test("update_task edits editable fields with partial-update semantics", async () => {
+  const { path } = tempDb();
+  const store = await LocalCommsStore.openSqlite(path);
+
+  await store.registerAgent({ id: "codex", name: "Codex" });
+  await store.registerAgent({ id: "claude", name: "Claude Code" });
+  await store.registerAgent({ id: "cursor", name: "Cursor" });
+
+  const parent = await store.createTask({
+    creatorId: "codex",
+    title: "Parent task",
+  });
+  const other = await store.createTask({
+    creatorId: "codex",
+    title: "Other dependency",
+  });
+
+  const task = await store.createTask({
+    creatorId: "codex",
+    title: "Original title",
+    description: "Original description",
+    channel: "docs",
+  });
+
+  // Partial update: only title and assignee_id. Omitted fields stay unchanged.
+  const updated = await store.updateTask({
+    agentId: "codex",
+    taskId: task.id,
+    title: "Corrected title",
+    assigneeId: "claude",
+  });
+
+  expect(updated.title).toBe("Corrected title");
+  expect(updated.assignee_id).toBe("claude");
+  expect(updated.description).toBe("Original description");
+  expect(updated.channel).toBe("docs");
+  expect(updated.status).toBe("open");
+
+  // Reassign directly to another agent (direct-assignment path).
+  const reassigned = await store.updateTask({
+    agentId: "codex",
+    taskId: task.id,
+    assigneeId: "cursor",
+  });
+  expect(reassigned.assignee_id).toBe("cursor");
+
+  // Update description, channel, parent_task_id, and dependencies together.
+  const withDeps = await store.updateTask({
+    agentId: "codex",
+    taskId: task.id,
+    description: "Revised description",
+    channel: "backend",
+    parentTaskId: parent.id,
+    dependencies: [parent.id, other.id],
+  });
+  expect(withDeps.description).toBe("Revised description");
+  expect(withDeps.channel).toBe("backend");
+  expect(withDeps.parent_task_id).toBe(parent.id);
+  expect(withDeps.dependencies).toEqual([other.id, parent.id].sort());
+
+  // Clearing dependencies with [] and clearing channel/parent/assignee with null.
+  const cleared = await store.updateTask({
+    agentId: "codex",
+    taskId: task.id,
+    dependencies: [],
+    channel: null,
+    parentTaskId: null,
+    assigneeId: null,
+  });
+  expect(cleared.dependencies).toEqual([]);
+  expect(cleared.channel).toBeNull();
+  expect(cleared.parent_task_id).toBeNull();
+  expect(cleared.assignee_id).toBeNull();
+
+  // Omitting dependencies leaves them unchanged (still empty here).
+  const untouched = await store.updateTask({
+    agentId: "codex",
+    taskId: task.id,
+    title: "Final title",
+  });
+  expect(untouched.dependencies).toEqual([]);
+  expect(untouched.title).toBe("Final title");
+
+  await store.close();
+});
+
+test("update_task emits updated events for changed fields and status_changed for status", async () => {
+  const { path } = tempDb();
+  const store = await LocalCommsStore.openSqlite(path);
+  await store.registerAgent({ id: "codex", name: "Codex" });
+
+  const task = await store.createTask({ creatorId: "codex", title: "Audit task" });
+
+  // Field-only update emits `updated`, not `status_changed` (status unchanged).
+  await store.updateTask({
+    agentId: "codex",
+    taskId: task.id,
+    title: "Audited task",
+    note: "Fixed typo",
+  });
+  let events = await store.listVisibleTaskEvents("codex", task.id);
+  expect(events.map((e) => e.event_type)).toEqual(["created", "updated"]);
+  expect(events.at(-1)?.note).toContain("title");
+  expect(events.at(-1)?.note).toContain("Fixed typo");
+
+  // Status change emits `status_changed`.
+  await store.updateTask({ agentId: "codex", taskId: task.id, status: "done" });
+  events = await store.listVisibleTaskEvents("codex", task.id);
+  expect(events.map((e) => e.event_type)).toEqual(["created", "updated", "status_changed"]);
+
+  await store.close();
+});
+
+test("update_task rejects invalid assignee_id, parent_task_id, and self-parent", async () => {
+  const { path } = tempDb();
+  const store = await LocalCommsStore.openSqlite(path);
+  await store.registerAgent({ id: "codex", name: "Codex", workspace: "ws" });
+
+  const task = await store.createTask({
+    creatorId: "codex",
+    workspace: "ws",
+    title: "Task",
+  });
+
+  await expect(
+    store.updateTask({ agentId: "codex", workspace: "ws", taskId: task.id, assigneeId: "ghost" }),
+  ).rejects.toThrow(/Invalid assignee_id 'ghost'/);
+
+  await expect(
+    store.updateTask({
+      agentId: "codex",
+      workspace: "ws",
+      taskId: task.id,
+      parentTaskId: "nonexistent",
+    }),
+  ).rejects.toThrow(/Invalid parent_task_id 'nonexistent'/);
+
+  await expect(
+    store.updateTask({ agentId: "codex", workspace: "ws", taskId: task.id, parentTaskId: task.id }),
+  ).rejects.toThrow(/cannot be its own parent/);
+
+  // Parent in a different workspace is invalid.
+  const otherWsTask = await store.createTask({
+    creatorId: "codex",
+    workspace: "other-ws",
+    title: "Other workspace task",
+  });
+  await expect(
+    store.updateTask({
+      agentId: "codex",
+      workspace: "ws",
+      taskId: task.id,
+      parentTaskId: otherWsTask.id,
+    }),
+  ).rejects.toThrow(/Invalid parent_task_id/);
+
+  // No fields were mutated by the failed updates.
+  const fresh = (await store.listAllTasks({ workspace: "ws" })).find((t) => t.id === task.id);
+  expect(fresh?.assignee_id).toBeNull();
+  expect(fresh?.parent_task_id).toBeNull();
+
+  await store.close();
+});
+
+test("update_task validates dependencies and avoids spurious events", async () => {
+  const { path } = tempDb();
+  const store = await LocalCommsStore.openSqlite(path);
+  await store.registerAgent({ id: "codex", name: "Codex", workspace: "ws" });
+
+  const dep = await store.createTask({ creatorId: "codex", workspace: "ws", title: "Dependency" });
+  const task = await store.createTask({ creatorId: "codex", workspace: "ws", title: "Task" });
+
+  // Unknown dependency id is rejected (no silent drop).
+  await expect(
+    store.updateTask({
+      agentId: "codex",
+      workspace: "ws",
+      taskId: task.id,
+      dependencies: ["ghost"],
+    }),
+  ).rejects.toThrow(/Invalid dependency 'ghost'/);
+
+  // Self-dependency is rejected.
+  await expect(
+    store.updateTask({
+      agentId: "codex",
+      workspace: "ws",
+      taskId: task.id,
+      dependencies: [task.id],
+    }),
+  ).rejects.toThrow(/cannot depend on itself/);
+
+  // Dependency in a different workspace is rejected.
+  const otherWsDep = await store.createTask({
+    creatorId: "codex",
+    workspace: "other-ws",
+    title: "Other workspace dep",
+  });
+  await expect(
+    store.updateTask({
+      agentId: "codex",
+      workspace: "ws",
+      taskId: task.id,
+      dependencies: [otherWsDep.id],
+    }),
+  ).rejects.toThrow(/Invalid dependency/);
+
+  // Valid dependency set is applied and emits an `updated` event.
+  await store.updateTask({
+    agentId: "codex",
+    workspace: "ws",
+    taskId: task.id,
+    dependencies: [dep.id],
+  });
+  let events = await store.listVisibleTaskEvents("codex", task.id, "ws");
+  expect(events.map((e) => e.event_type)).toEqual(["created", "updated"]);
+  expect(events.at(-1)?.note).toContain("dependencies");
+
+  // Re-setting the same dependency set does NOT emit a spurious event.
+  await store.updateTask({
+    agentId: "codex",
+    workspace: "ws",
+    taskId: task.id,
+    dependencies: [dep.id],
+    note: "no-op deps",
+  });
+  events = await store.listVisibleTaskEvents("codex", task.id, "ws");
+  // The only new event should be a note-only `updated` (no `dependencies` field
+  // flagged because the set is unchanged).
+  const lastEvent = events.at(-1);
+  expect(lastEvent?.event_type).toBe("updated");
+  expect(lastEvent?.note).toBe("no-op deps");
+
+  await store.close();
+});
+
+test("update_task enforces visibility and rejects empty title", async () => {
+  const { path } = tempDb();
+  const store = await LocalCommsStore.openSqlite(path);
+
+  const task = await store.createTask({
+    creatorId: "codex",
+    workspace: "repo-a",
+    title: "Private task",
+    assigneeId: "claude",
+  });
+
+  // An agent that cannot see the task cannot edit it.
+  await expect(
+    store.updateTask({
+      agentId: "cursor",
+      workspace: "repo-a",
+      taskId: task.id,
+      title: "Hijacked",
+    }),
+  ).rejects.toThrow(/not visible/);
+
+  // Empty title is rejected.
+  await expect(
+    store.updateTask({ agentId: "codex", workspace: "repo-a", taskId: task.id, title: "   " }),
+  ).rejects.toThrow(/title cannot be empty/);
+
+  await store.close();
+});
+
 test.skipIf(!process.env.AGENT_MAILBOX_TEST_DATABASE_URL)(
   "postgres store supports core mailbox operations",
   async () => {
