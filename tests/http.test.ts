@@ -244,6 +244,35 @@ test(
       expect(JSON.stringify(updated.structuredContent)).toContain("status_changed");
       expect(JSON.stringify(updated.structuredContent)).toContain("/tmp/review.log");
 
+      // list_task_events reads the audit log standalone, oldest-first, without mutating.
+      const taskEvents = await agentB.client.callTool({
+        name: "list_task_events",
+        arguments: {
+          task_id: createdTask.id,
+          limit: 2,
+          offset: 0,
+        },
+      });
+      expect(taskEvents.isError).not.toBe(true);
+      const eventsContent = taskEvents.structuredContent as {
+        events: { event_type: string }[];
+        total: number;
+        has_more: boolean;
+      };
+      expect(eventsContent.total).toBe(3);
+      expect(eventsContent.has_more).toBe(true);
+      expect(eventsContent.events.map((e) => e.event_type)).toEqual(["created", "claimed"]);
+
+      // A non-visible task returns a clear error over MCP.
+      const invisibleEvents = await agentA.client.callTool({
+        name: "list_task_events",
+        arguments: {
+          task_id: "no-such-task",
+        },
+      });
+      expect(invisibleEvents.isError).toBe(true);
+      expect(JSON.stringify(invisibleEvents.content)).toContain("not visible");
+
       const lock = await agentA.client.callTool({
         name: "acquire_lock",
         arguments: {

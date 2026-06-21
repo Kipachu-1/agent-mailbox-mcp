@@ -991,6 +991,95 @@ test.skipIf(!process.env.AGENT_MAILBOX_TEST_DATABASE_URL)(
   },
 );
 
+test("listVisibleTaskEventsPage paginates events oldest-first and enforces visibility without mutating", async () => {
+  const { path } = tempDb();
+  const store = await LocalCommsStore.openSqlite(path);
+
+  // Private task: assigned to claude, no channel -> visible only to codex
+  // (creator) and claude (assignee), not to other agents like cursor.
+  const task = await store.createTask({
+    creatorId: "codex",
+    workspace: "repo-a",
+    title: "Audit log task",
+    assigneeId: "claude",
+  });
+  // created -> claimed -> status_changed(done) => 3 events, oldest-first.
+  await store.claimTask("claude", task.id, "Claiming.", "repo-a");
+  await store.updateTask({
+    agentId: "claude",
+    workspace: "repo-a",
+    taskId: task.id,
+    status: "done",
+    note: "Done.",
+  });
+
+  const allEvents = await store.listVisibleTaskEvents("codex", task.id, "repo-a");
+  expect(allEvents).toHaveLength(3);
+  expect(allEvents.map((e) => e.event_type)).toEqual(["created", "claimed", "status_changed"]);
+
+  // Page 1: first two events, oldest-first.
+  const page1 = await store.listVisibleTaskEventsPage("codex", task.id, {
+    workspace: "repo-a",
+    limit: 2,
+    offset: 0,
+  });
+  expect(page1.results).toHaveLength(2);
+  expect(page1.total).toBe(3);
+  expect(page1.has_more).toBe(true);
+  expect(page1.results.map((e) => e.event_type)).toEqual(["created", "claimed"]);
+  // Ordering is by created_at ascending.
+  expect(page1.results[0]!.created_at <= page1.results[1]!.created_at).toBe(true);
+
+  // Page 2: the remaining event, has_more false.
+  const page2 = await store.listVisibleTaskEventsPage("codex", task.id, {
+    workspace: "repo-a",
+    limit: 2,
+    offset: 2,
+  });
+  expect(page2.results).toHaveLength(1);
+  expect(page2.has_more).toBe(false);
+  expect(page2.results[0]?.event_type).toBe("status_changed");
+
+  // Default limit (50) returns everything in one page.
+  const fullPage = await store.listVisibleTaskEventsPage("codex", task.id, { workspace: "repo-a" });
+  expect(fullPage.results).toHaveLength(3);
+  expect(fullPage.total).toBe(3);
+  expect(fullPage.has_more).toBe(false);
+  expect(fullPage.results.map((e) => e.event_type)).toEqual([
+    "created",
+    "claimed",
+    "status_changed",
+  ]);
+
+  // Offset beyond total -> empty, not an error, total still correct.
+  const beyond = await store.listVisibleTaskEventsPage("codex", task.id, {
+    workspace: "repo-a",
+    limit: 2,
+    offset: 99,
+  });
+  expect(beyond.results).toHaveLength(0);
+  expect(beyond.total).toBe(3);
+  expect(beyond.has_more).toBe(false);
+
+  // Read-only guarantee: reading events does not create a new event.
+  const beforeCount = (await store.listVisibleTaskEvents("codex", task.id, "repo-a")).length;
+  await store.listVisibleTaskEventsPage("codex", task.id, { workspace: "repo-a" });
+  const afterCount = (await store.listVisibleTaskEvents("codex", task.id, "repo-a")).length;
+  expect(afterCount).toBe(beforeCount);
+
+  // Visibility: an agent that cannot see the task gets a clear error.
+  await expect(
+    store.listVisibleTaskEventsPage("cursor", task.id, { workspace: "repo-a" }),
+  ).rejects.toThrow(/not visible/);
+
+  // Non-existent task also returns a clear error (no existence leak).
+  await expect(
+    store.listVisibleTaskEventsPage("codex", "no-such-task", { workspace: "repo-a" }),
+  ).rejects.toThrow(/not visible/);
+
+  await store.close();
+});
+
 function tempDb(): { dir: string; path: string } {
   const dir = mkdtempSync(join(tmpdir(), "agent-mailbox-"));
   tempDirs.push(dir);
