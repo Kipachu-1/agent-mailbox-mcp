@@ -1,6 +1,16 @@
 import type { StoreContext, StoreValue } from "./context";
-import { emptyToNull, encodeJson, isoNow, mapAgent, workspaceOf, type AgentRow } from "./mappers";
-import type { AgentRecord, RegisterAgentInput } from "./types";
+import {
+  emptyToNull,
+  encodeJson,
+  hasMore,
+  isoNow,
+  limit,
+  mapAgent,
+  offset,
+  workspaceOf,
+  type AgentRow,
+} from "./mappers";
+import type { AgentRecord, Paginated, RegisterAgentInput } from "./types";
 
 export async function registerAgent(ctx: StoreContext, input: RegisterAgentInput): Promise<AgentRecord> {
   const now = isoNow();
@@ -43,18 +53,55 @@ export async function registerAgent(ctx: StoreContext, input: RegisterAgentInput
 export async function listAgents(
   ctx: Pick<StoreContext, "all">,
   workspace?: string,
+  limitValue?: number,
+  offsetValue?: number,
 ): Promise<AgentRecord[]> {
-  const clauses: string[] = [];
-  const params: StoreValue[] = [];
-  if (workspace) {
-    clauses.push("workspace = ?");
-    params.push(workspaceOf(workspace));
-  }
-  const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+  const { where, params } = agentsWhere(workspace);
+  const suffix = agentsLimitOffset(limitValue, offsetValue);
   return (await ctx.all<AgentRow>(
-    `SELECT * FROM agents ${where} ORDER BY last_seen_at DESC, id ASC`,
-    params,
+    `SELECT * FROM agents ${where} ORDER BY last_seen_at DESC, id ASC${suffix.sql}`,
+    [...params, ...suffix.params],
   )).map(mapAgent);
+}
+
+export async function listAgentsPaginated(
+  ctx: Pick<StoreContext, "all" | "get">,
+  workspace?: string,
+  limitValue?: number,
+  offsetValue?: number,
+): Promise<Paginated<AgentRecord>> {
+  const { where, params } = agentsWhere(workspace);
+  const offsetValueResolved = offset(offsetValue);
+  const suffix = agentsLimitOffset(limitValue, offsetValueResolved);
+  const [rows, totalRow] = await Promise.all([
+    ctx.all<AgentRow>(
+      `SELECT * FROM agents ${where} ORDER BY last_seen_at DESC, id ASC${suffix.sql}`,
+      [...params, ...suffix.params],
+    ),
+    ctx.get<{ c: number }>(`SELECT COUNT(*) AS c FROM agents ${where}`, params),
+  ]);
+  const results = rows.map(mapAgent);
+  const total = Number(totalRow?.c ?? 0);
+  return { results, total, has_more: hasMore(offsetValueResolved, results.length, total) };
+}
+
+function agentsWhere(
+  workspace?: string,
+): { where: string; params: StoreValue[] } {
+  if (!workspace) {
+    return { where: "", params: [] };
+  }
+  return { where: "WHERE workspace = ?", params: [workspaceOf(workspace)] };
+}
+
+function agentsLimitOffset(
+  limitValue: number | undefined,
+  offsetValue: number | undefined,
+): { sql: string; params: StoreValue[] } {
+  if (limitValue === undefined) {
+    return { sql: "", params: [] };
+  }
+  return { sql: " LIMIT ? OFFSET ?", params: [limit(limitValue), offset(offsetValue)] };
 }
 
 export async function whoIsOnline(

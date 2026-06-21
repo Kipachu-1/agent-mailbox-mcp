@@ -1,6 +1,16 @@
 import type { StoreContext, StoreValue } from "./context";
-import { emptyToNull, isoNow, mapLock, ttlSeconds, workspaceOf, type LockRow } from "./mappers";
-import type { AcquireLockInput, ListLocksOptions, LockRecord } from "./types";
+import {
+  emptyToNull,
+  hasMore,
+  isoNow,
+  limit,
+  mapLock,
+  offset,
+  ttlSeconds,
+  workspaceOf,
+  type LockRow,
+} from "./mappers";
+import type { AcquireLockInput, ListLocksOptions, LockRecord, Paginated } from "./types";
 
 export async function acquireLock(ctx: StoreContext, input: AcquireLockInput): Promise<LockRecord> {
   const workspace = workspaceOf(input.workspace);
@@ -70,6 +80,43 @@ export async function listLocks(
   ctx: StoreContext,
   options: ListLocksOptions = {},
 ): Promise<LockRecord[]> {
+  const { clauses, params } = listLocksWhere(options);
+  const suffix = locksLimitOffset(options.limit, options.offset);
+  return (await ctx.all<LockRow>(
+    `SELECT * FROM locks
+     WHERE ${clauses.join(" AND ")}
+     ORDER BY updated_at DESC${suffix.sql}`,
+    [...params, ...suffix.params],
+  )).map(mapLock);
+}
+
+export async function listLocksPaginated(
+  ctx: StoreContext,
+  options: ListLocksOptions = {},
+): Promise<Paginated<LockRecord>> {
+  const { clauses, params } = listLocksWhere(options);
+  const offsetValue = offset(options.offset);
+  const suffix = locksLimitOffset(options.limit, offsetValue);
+  const [rows, totalRow] = await Promise.all([
+    ctx.all<LockRow>(
+      `SELECT * FROM locks
+       WHERE ${clauses.join(" AND ")}
+       ORDER BY updated_at DESC${suffix.sql}`,
+      [...params, ...suffix.params],
+    ),
+    ctx.get<{ c: number }>(
+      `SELECT COUNT(*) AS c FROM locks WHERE ${clauses.join(" AND ")}`,
+      params,
+    ),
+  ]);
+  const results = rows.map(mapLock);
+  const total = Number(totalRow?.c ?? 0);
+  return { results, total, has_more: hasMore(offsetValue, results.length, total) };
+}
+
+function listLocksWhere(
+  options: ListLocksOptions,
+): { clauses: string[]; params: StoreValue[] } {
   const workspace = workspaceOf(options.workspace);
   const clauses = ["workspace = ?"];
   const params: StoreValue[] = [workspace];
@@ -78,13 +125,17 @@ export async function listLocks(
     params.push(options.resource);
   }
   addExpiryFilter(clauses, params, options.includeExpired);
+  return { clauses, params };
+}
 
-  return (await ctx.all<LockRow>(
-    `SELECT * FROM locks
-     WHERE ${clauses.join(" AND ")}
-     ORDER BY updated_at DESC`,
-    params,
-  )).map(mapLock);
+function locksLimitOffset(
+  limitValue: number | undefined,
+  offsetValue: number | undefined,
+): { sql: string; params: StoreValue[] } {
+  if (limitValue === undefined) {
+    return { sql: "", params: [] };
+  }
+  return { sql: " LIMIT ? OFFSET ?", params: [limit(limitValue), offset(offsetValue)] };
 }
 
 export async function listAllLocks(

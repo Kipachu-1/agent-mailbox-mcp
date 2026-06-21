@@ -4,9 +4,11 @@ import type { StoreContext, StoreValue } from "./context";
 import {
   emptyToNull,
   encodeJson,
+  hasMore,
   isoNow,
   limit,
   mapTask,
+  offset,
   shouldNotifyForStatus,
   workspaceOf,
   type TaskRow,
@@ -22,6 +24,7 @@ import {
 import type {
   CreateTaskInput,
   ListTasksOptions,
+  Paginated,
   TaskEventRecord,
   TaskRecord,
   UpdateTaskInput,
@@ -71,20 +74,51 @@ export async function listTasks(
   agentId: string,
   options: ListTasksOptions = {},
 ): Promise<TaskRecord[]> {
-  const workspace = workspaceOf(options.workspace);
-  const clauses = ["workspace = ?", visibleTaskClause()];
-  const params: StoreValue[] = [workspace, agentId, agentId];
-
-  addTaskFilters(clauses, params, options);
-  params.push(limit(options.limit));
+  const { clauses, params } = listTasksWhere(agentId, options);
   const rows = await ctx.all<TaskRow>(
     `SELECT * FROM tasks
      WHERE ${clauses.join(" AND ")}
      ORDER BY priority DESC, updated_at DESC
-     LIMIT ?`,
-    params,
+     LIMIT ? OFFSET ?`,
+    [...params, limit(options.limit), offset(options.offset)],
   );
   return Promise.all(rows.map((row) => taskWithRelations(ctx, row)));
+}
+
+export async function listTasksPaginated(
+  ctx: StoreContext,
+  agentId: string,
+  options: ListTasksOptions = {},
+): Promise<Paginated<TaskRecord>> {
+  const { clauses, params } = listTasksWhere(agentId, options);
+  const offsetValue = offset(options.offset);
+  const [rows, totalRow] = await Promise.all([
+    ctx.all<TaskRow>(
+      `SELECT * FROM tasks
+       WHERE ${clauses.join(" AND ")}
+       ORDER BY priority DESC, updated_at DESC
+       LIMIT ? OFFSET ?`,
+      [...params, limit(options.limit), offsetValue],
+    ),
+    ctx.get<{ c: number }>(
+      `SELECT COUNT(*) AS c FROM tasks WHERE ${clauses.join(" AND ")}`,
+      params,
+    ),
+  ]);
+  const results = await Promise.all(rows.map((row) => taskWithRelations(ctx, row)));
+  const total = Number(totalRow?.c ?? 0);
+  return { results, total, has_more: hasMore(offsetValue, results.length, total) };
+}
+
+function listTasksWhere(
+  agentId: string,
+  options: ListTasksOptions,
+): { clauses: string[]; params: StoreValue[] } {
+  const workspace = workspaceOf(options.workspace);
+  const clauses = ["workspace = ?", visibleTaskClause()];
+  const params: StoreValue[] = [workspace, agentId, agentId];
+  addTaskFilters(clauses, params, options);
+  return { clauses, params };
 }
 
 export async function listAllTasks(

@@ -7,10 +7,21 @@ import {
   type StoreContext,
   type StoreValue,
 } from "./context";
-import { emptyToNull, encodeJson, isoNow, limit, mapMessage, type MessageRow, type ThreadRow } from "./mappers";
+import {
+  emptyToNull,
+  encodeJson,
+  hasMore,
+  isoNow,
+  limit,
+  mapMessage,
+  offset,
+  type MessageRow,
+  type ThreadRow,
+} from "./mappers";
 import type {
   InboxOptions,
   MessageRecord,
+  Paginated,
   ReplyMessageInput,
   SearchMessagesOptions,
   SendMessageInput,
@@ -107,10 +118,55 @@ export async function inbox(
   agentId: string,
   options: InboxOptions = {},
 ): Promise<MessageRecord[]> {
-  const workspace = options.workspace?.trim() || "default";
-  const clauses = [visibleMessageClause(options.includeSent !== false)];
-  const params: StoreValue[] = [agentId, workspace, agentId];
+  const { clauses, params } = inboxWhere(agentId, options);
+  const rows = await ctx.all<MessageRow>(
+    `SELECT m.*, r.read_at
+     ${INBOX_FROM}
+     WHERE ${clauses.join(" AND ")}
+     ORDER BY m.created_at DESC
+     LIMIT ? OFFSET ?`,
+    [agentId, ...params, limit(options.limit), offset(options.offset)],
+  );
+  return Promise.all(rows.map((row) => messageWithRelations(ctx, row, agentId)));
+}
 
+export async function inboxPaginated(
+  ctx: StoreContext,
+  agentId: string,
+  options: InboxOptions = {},
+): Promise<Paginated<MessageRecord>> {
+  const { clauses, params } = inboxWhere(agentId, options);
+  const offsetValue = offset(options.offset);
+  const [rows, totalRow] = await Promise.all([
+    ctx.all<MessageRow>(
+      `SELECT m.*, r.read_at
+       ${INBOX_FROM}
+       WHERE ${clauses.join(" AND ")}
+       ORDER BY m.created_at DESC
+       LIMIT ? OFFSET ?`,
+      [agentId, ...params, limit(options.limit), offsetValue],
+    ),
+    ctx.get<{ c: number }>(
+      `SELECT COUNT(*) AS c
+       ${INBOX_FROM}
+       WHERE ${clauses.join(" AND ")}`,
+      [agentId, ...params],
+    ),
+  ]);
+  const results = await Promise.all(rows.map((row) => messageWithRelations(ctx, row, agentId)));
+  const total = Number(totalRow?.c ?? 0);
+  return { results, total, has_more: hasMore(offsetValue, results.length, total) };
+}
+
+const INBOX_FROM = `FROM messages m
+     LEFT JOIN message_reads r ON r.message_id = m.id AND r.agent_id = ?`;
+
+function inboxWhere(
+  agentId: string,
+  options: InboxOptions,
+): { clauses: string[]; params: StoreValue[] } {
+  const clauses = [visibleMessageClause(options.includeSent !== false)];
+  const params: StoreValue[] = [options.workspace?.trim() || "default", agentId];
   if (options.includeSent !== false) {
     params.push(agentId);
   }
@@ -126,18 +182,7 @@ export async function inbox(
     clauses.push("m.sender_id != ? AND r.read_at IS NULL");
     params.push(agentId);
   }
-
-  params.push(limit(options.limit));
-  const rows = await ctx.all<MessageRow>(
-    `SELECT m.*, r.read_at
-     FROM messages m
-     LEFT JOIN message_reads r ON r.message_id = m.id AND r.agent_id = ?
-     WHERE ${clauses.join(" AND ")}
-     ORDER BY m.created_at DESC
-     LIMIT ?`,
-    params,
-  );
-  return Promise.all(rows.map((row) => messageWithRelations(ctx, row, agentId)));
+  return { clauses, params };
 }
 
 export async function readMessage(
@@ -171,26 +216,58 @@ export async function searchMessages(
   agentId: string,
   options: SearchMessagesOptions,
 ): Promise<MessageRecord[]> {
-  const workspace = options.workspace?.trim() || "default";
-  const clauses = [visibleMessageClause(true), caseInsensitiveLike(ctx, "m.body")];
-  const params: StoreValue[] = [agentId, workspace, agentId, agentId, `%${options.query}%`];
+  const { clauses, params } = searchMessagesWhere(ctx, agentId, options);
+  const rows = await ctx.all<MessageRow>(
+    `SELECT m.*, r.read_at
+     ${INBOX_FROM}
+     WHERE ${clauses.join(" AND ")}
+     ORDER BY m.created_at DESC
+     LIMIT ? OFFSET ?`,
+    [agentId, ...params, limit(options.limit), offset(options.offset)],
+  );
+  return Promise.all(rows.map((row) => messageWithRelations(ctx, row, agentId)));
+}
 
+export async function searchMessagesPaginated(
+  ctx: StoreContext,
+  agentId: string,
+  options: SearchMessagesOptions,
+): Promise<Paginated<MessageRecord>> {
+  const { clauses, params } = searchMessagesWhere(ctx, agentId, options);
+  const offsetValue = offset(options.offset);
+  const [rows, totalRow] = await Promise.all([
+    ctx.all<MessageRow>(
+      `SELECT m.*, r.read_at
+       ${INBOX_FROM}
+       WHERE ${clauses.join(" AND ")}
+       ORDER BY m.created_at DESC
+       LIMIT ? OFFSET ?`,
+      [agentId, ...params, limit(options.limit), offsetValue],
+    ),
+    ctx.get<{ c: number }>(
+      `SELECT COUNT(*) AS c
+       ${INBOX_FROM}
+       WHERE ${clauses.join(" AND ")}`,
+      [agentId, ...params],
+    ),
+  ]);
+  const results = await Promise.all(rows.map((row) => messageWithRelations(ctx, row, agentId)));
+  const total = Number(totalRow?.c ?? 0);
+  return { results, total, has_more: hasMore(offsetValue, results.length, total) };
+}
+
+function searchMessagesWhere(
+  ctx: Pick<StoreContext, "dialect">,
+  agentId: string,
+  options: SearchMessagesOptions,
+): { clauses: string[]; params: StoreValue[] } {
+  const clauses = [visibleMessageClause(true), caseInsensitiveLike(ctx, "m.body")];
+  const params: StoreValue[] = [options.workspace?.trim() || "default", agentId, agentId, `%${options.query}%`];
   if (options.channel) {
     clauses.push("m.channel = ?");
     params.push(options.channel);
   }
-
-  params.push(limit(options.limit));
-  const rows = await ctx.all<MessageRow>(
-    `SELECT m.*, r.read_at
-     FROM messages m
-     LEFT JOIN message_reads r ON r.message_id = m.id AND r.agent_id = ?
-     WHERE ${clauses.join(" AND ")}
-     ORDER BY m.created_at DESC
-     LIMIT ?`,
-    params,
-  );
-  return Promise.all(rows.map((row) => messageWithRelations(ctx, row, agentId)));
+  return { clauses, params };
 }
 
 export async function listThreads(
@@ -198,6 +275,7 @@ export async function listThreads(
   agentId: string,
   workspace?: string,
   limitValue?: number,
+  offsetValue?: number,
 ): Promise<ThreadRecord[]> {
   const scope = workspace?.trim() || "default";
   return (await ctx.all<ThreadRow>(
@@ -216,9 +294,53 @@ export async function listThreads(
      WHERE ${visibleMessageClause(true)}
      GROUP BY m.workspace, m.thread_id
      ORDER BY last_message_at DESC
-     LIMIT ?`,
-    [scope, agentId, agentId, limit(limitValue)],
+     LIMIT ? OFFSET ?`,
+    [scope, agentId, agentId, limit(limitValue), offset(offsetValue)],
   )).map((row) => ({ ...row, message_count: Number(row.message_count) }));
+}
+
+export async function listThreadsPaginated(
+  ctx: StoreContext,
+  agentId: string,
+  workspace?: string,
+  limitValue?: number,
+  offsetValue?: number,
+): Promise<Paginated<ThreadRecord>> {
+  const scope = workspace?.trim() || "default";
+  const offsetValueResolved = offset(offsetValue);
+  const visibilityParams: StoreValue[] = [scope, agentId, agentId];
+  const [rows, totalRow] = await Promise.all([
+    ctx.all<ThreadRow>(
+      `SELECT
+         m.thread_id,
+         m.workspace,
+         MAX(m.channel) AS channel,
+         COUNT(*) AS message_count,
+         MAX(m.created_at) AS last_message_at,
+         (
+           SELECT body FROM messages latest
+           WHERE latest.thread_id = m.thread_id AND latest.workspace = m.workspace
+           ORDER BY latest.created_at DESC LIMIT 1
+         ) AS last_message_body
+       FROM messages m
+       WHERE ${visibleMessageClause(true)}
+       GROUP BY m.workspace, m.thread_id
+       ORDER BY last_message_at DESC
+       LIMIT ? OFFSET ?`,
+      [...visibilityParams, limit(limitValue), offsetValueResolved],
+    ),
+    ctx.get<{ c: number }>(
+      `SELECT COUNT(*) AS c FROM (
+         SELECT 1 FROM messages m
+         WHERE ${visibleMessageClause(true)}
+         GROUP BY m.workspace, m.thread_id
+       ) AS threads`,
+      visibilityParams,
+    ),
+  ]);
+  const results = rows.map((row) => ({ ...row, message_count: Number(row.message_count) }));
+  const total = Number(totalRow?.c ?? 0);
+  return { results, total, has_more: hasMore(offsetValueResolved, results.length, total) };
 }
 
 export async function getThread(
@@ -227,18 +349,61 @@ export async function getThread(
   threadId: string,
   workspace?: string,
   limitValue?: number,
+  offsetValue?: number,
 ): Promise<MessageRecord[]> {
-  const scope = workspace?.trim() || "default";
+  const { clauses, params } = getThreadWhere(agentId, threadId, workspace);
   const rows = await ctx.all<MessageRow>(
     `SELECT m.*, r.read_at
-     FROM messages m
-     LEFT JOIN message_reads r ON r.message_id = m.id AND r.agent_id = ?
-     WHERE ${visibleMessageClause(true)} AND m.thread_id = ?
+     ${INBOX_FROM}
+     WHERE ${clauses.join(" AND ")}
      ORDER BY m.created_at ASC, m.id ASC
-     LIMIT ?`,
-    [agentId, scope, agentId, agentId, threadId, limit(limitValue)],
+     LIMIT ? OFFSET ?`,
+    [agentId, ...params, limit(limitValue), offset(offsetValue)],
   );
   return Promise.all(rows.map((row) => messageWithRelations(ctx, row, agentId)));
+}
+
+export async function getThreadPaginated(
+  ctx: StoreContext,
+  agentId: string,
+  threadId: string,
+  workspace?: string,
+  limitValue?: number,
+  offsetValue?: number,
+): Promise<Paginated<MessageRecord>> {
+  const { clauses, params } = getThreadWhere(agentId, threadId, workspace);
+  const offsetValueResolved = offset(offsetValue);
+  const [rows, totalRow] = await Promise.all([
+    ctx.all<MessageRow>(
+      `SELECT m.*, r.read_at
+       ${INBOX_FROM}
+       WHERE ${clauses.join(" AND ")}
+       ORDER BY m.created_at ASC, m.id ASC
+       LIMIT ? OFFSET ?`,
+      [agentId, ...params, limit(limitValue), offsetValueResolved],
+    ),
+    ctx.get<{ c: number }>(
+      `SELECT COUNT(*) AS c
+       ${INBOX_FROM}
+       WHERE ${clauses.join(" AND ")}`,
+      [agentId, ...params],
+    ),
+  ]);
+  const results = await Promise.all(rows.map((row) => messageWithRelations(ctx, row, agentId)));
+  const total = Number(totalRow?.c ?? 0);
+  return { results, total, has_more: hasMore(offsetValueResolved, results.length, total) };
+}
+
+function getThreadWhere(
+  agentId: string,
+  threadId: string,
+  workspace?: string,
+): { clauses: string[]; params: StoreValue[] } {
+  const scope = workspace?.trim() || "default";
+  return {
+    clauses: [visibleMessageClause(true), "m.thread_id = ?"],
+    params: [scope, agentId, agentId, threadId],
+  };
 }
 
 export async function getMessageForAgent(

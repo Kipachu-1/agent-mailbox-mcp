@@ -212,11 +212,16 @@ export function createCommunicationTools(
     communicationTool({
       name: "list_agents",
       description:
-        "List known local AI agents that have registered with this mailbox, optionally scoped to one workspace.",
+        "List known local AI agents that have registered with this mailbox, optionally scoped to one workspace. Use offset and limit to page through large workspaces; total and has_more describe the full result set.",
       inputSchema: z.object({
         workspace: workspaceSchema,
+        limit: z.number().int().min(1).max(200).optional(),
+        offset: z.number().int().min(0).optional(),
       }),
-      handler: async (input) => json({ agents: await store.listAgents(input.workspace) }),
+      handler: async (input) => {
+        const page = await store.listAgentsPage(input.workspace, input.limit, input.offset);
+        return json({ agents: page.results, total: page.total, has_more: page.has_more });
+      },
     }),
     communicationTool({
       name: "who_is_online",
@@ -289,7 +294,7 @@ export function createCommunicationTools(
     communicationTool({
       name: "inbox",
       description:
-        "List unread or recent direct and channel messages visible to the current agent. Use unread_only for triage, then read_message after handling each item.",
+        "List unread or recent direct and channel messages visible to the current agent. Use unread_only for triage, then read_message after handling each item. Use offset and limit to page through a large inbox; total and has_more describe the full result set.",
       inputSchema: z.object({
         workspace: workspaceSchema,
         unread_only: z.boolean().optional(),
@@ -297,18 +302,20 @@ export function createCommunicationTools(
         channel: z.string().min(1).optional(),
         thread_id: z.string().min(1).optional(),
         limit: z.number().int().min(1).max(200).optional(),
+        offset: z.number().int().min(0).optional(),
       }),
-      handler: async (input) =>
-        json({
-          messages: await store.inbox(agent.id, {
-            workspace: input.workspace ?? agent.workspace,
-            unreadOnly: input.unread_only,
-            includeSent: input.include_sent,
-            channel: input.channel,
-            threadId: input.thread_id,
-            limit: input.limit,
-          }),
-        }),
+      handler: async (input) => {
+        const page = await store.inboxPage(agent.id, {
+          workspace: input.workspace ?? agent.workspace,
+          unreadOnly: input.unread_only,
+          includeSent: input.include_sent,
+          channel: input.channel,
+          threadId: input.thread_id,
+          limit: input.limit,
+          offset: input.offset,
+        });
+        return json({ messages: page.results, total: page.total, has_more: page.has_more });
+      },
     }),
     communicationTool({
       name: "read_message",
@@ -326,54 +333,64 @@ export function createCommunicationTools(
     communicationTool({
       name: "search_messages",
       description:
-        "Search visible direct and channel message bodies when recovering old decisions, handoffs, or context.",
+        "Search visible direct and channel message bodies when recovering old decisions, handoffs, or context. Use offset and limit to page through a large result set; total and has_more describe the full match set.",
       inputSchema: z.object({
         workspace: workspaceSchema,
         query: z.string().min(1),
         channel: z.string().min(1).optional(),
         limit: z.number().int().min(1).max(200).optional(),
+        offset: z.number().int().min(0).optional(),
       }),
-      handler: async (input) =>
-        json({
-          messages: await store.searchMessages(agent.id, {
-            workspace: input.workspace ?? agent.workspace,
-            query: input.query,
-            channel: input.channel,
-            limit: input.limit,
-          }),
-        }),
+      handler: async (input) => {
+        const page = await store.searchMessagesPage(agent.id, {
+          workspace: input.workspace ?? agent.workspace,
+          query: input.query,
+          channel: input.channel,
+          limit: input.limit,
+          offset: input.offset,
+        });
+        return json({ messages: page.results, total: page.total, has_more: page.has_more });
+      },
     }),
     communicationTool({
       name: "list_threads",
       description:
-        "List visible message threads in the current or requested workspace, ordered by recent activity.",
+        "List visible message threads in the current or requested workspace, ordered by recent activity. Use offset and limit to page through a large workspace; total and has_more describe the full result set.",
       inputSchema: z.object({
         workspace: workspaceSchema,
         limit: z.number().int().min(1).max(200).optional(),
+        offset: z.number().int().min(0).optional(),
       }),
-      handler: async (input) =>
-        json({
-          threads: await store.listThreads(agent.id, input.workspace ?? agent.workspace, input.limit),
-        }),
+      handler: async (input) => {
+        const page = await store.listThreadsPage(
+          agent.id,
+          input.workspace ?? agent.workspace,
+          input.limit,
+          input.offset,
+        );
+        return json({ threads: page.results, total: page.total, has_more: page.has_more });
+      },
     }),
     communicationTool({
       name: "get_thread",
       description:
-        "Return visible messages for one thread in chronological order so an agent can reconstruct a handoff conversation before acting.",
+        "Return visible messages for one thread in chronological order so an agent can reconstruct a handoff conversation before acting. Use offset and limit to page through long threads; total and has_more describe the full message set for the thread.",
       inputSchema: z.object({
         workspace: workspaceSchema,
         thread_id: z.string().min(1),
         limit: z.number().int().min(1).max(200).optional(),
+        offset: z.number().int().min(0).optional(),
       }),
-      handler: async (input) =>
-        json({
-          messages: await store.getThread(
-            agent.id,
-            input.thread_id,
-            input.workspace ?? agent.workspace,
-            input.limit,
-          ),
-        }),
+      handler: async (input) => {
+        const page = await store.getThreadPage(
+          agent.id,
+          input.thread_id,
+          input.workspace ?? agent.workspace,
+          input.limit,
+          input.offset,
+        );
+        return json({ messages: page.results, total: page.total, has_more: page.has_more });
+      },
     }),
     communicationTool({
       name: "watch_updates",
@@ -518,7 +535,7 @@ export function createCommunicationTools(
     communicationTool({
       name: "list_tasks",
       description:
-        "List visible tasks by status, assignee, creator, channel, parent, recency, or stale claim age. Use stale_after_seconds to find claimed tasks, then check recent presence and message context before reclaiming or reassigning.",
+        "List visible tasks by status, assignee, creator, channel, parent, recency, or stale claim age. Use stale_after_seconds to find claimed tasks, then check recent presence and message context before reclaiming or reassigning. Use offset and limit to page through a large task list; total and has_more describe the full result set.",
       inputSchema: z.object({
         workspace: workspaceSchema,
         status: taskStatusSchema.optional(),
@@ -528,20 +545,22 @@ export function createCommunicationTools(
         parent_task_id: z.string().min(1).optional(),
         stale_after_seconds: z.number().int().min(60).max(2_592_000).optional(),
         limit: z.number().int().min(1).max(200).optional(),
+        offset: z.number().int().min(0).optional(),
       }),
-      handler: async (input) =>
-        json({
-          tasks: await store.listTasks(agent.id, {
-            workspace: input.workspace ?? agent.workspace,
-            status: input.status as TaskStatus | undefined,
-            assigneeId: input.assignee_id,
-            creatorId: input.creator_id,
-            channel: input.channel,
-            parentTaskId: input.parent_task_id,
-            staleAfterSeconds: input.stale_after_seconds,
-            limit: input.limit,
-          }),
-        }),
+      handler: async (input) => {
+        const page = await store.listTasksPage(agent.id, {
+          workspace: input.workspace ?? agent.workspace,
+          status: input.status as TaskStatus | undefined,
+          assigneeId: input.assignee_id,
+          creatorId: input.creator_id,
+          channel: input.channel,
+          parentTaskId: input.parent_task_id,
+          staleAfterSeconds: input.stale_after_seconds,
+          limit: input.limit,
+          offset: input.offset,
+        });
+        return json({ tasks: page.results, total: page.total, has_more: page.has_more });
+      },
     }),
     communicationTool({
       name: "claim_task",
@@ -727,24 +746,26 @@ export function createCommunicationTools(
     communicationTool({
       name: "read_notes",
       description:
-        "Read shared scratchpad notes by workspace, channel, pin state, or search query. Check pinned notes before starting work in an unfamiliar workspace.",
+        "Read shared scratchpad notes by workspace, channel, pin state, or search query. Check pinned notes before starting work in an unfamiliar workspace. Use offset and limit to page through a large note set; total and has_more describe the full result set.",
       inputSchema: z.object({
         workspace: workspaceSchema,
         channel: z.string().min(1).optional(),
         pinned_only: z.boolean().optional(),
         query: z.string().min(1).optional(),
         limit: z.number().int().min(1).max(200).optional(),
+        offset: z.number().int().min(0).optional(),
       }),
-      handler: async (input) =>
-        json({
-          notes: await store.readNotes({
-            workspace: input.workspace ?? agent.workspace,
-            channel: input.channel,
-            pinnedOnly: input.pinned_only,
-            query: input.query,
-            limit: input.limit,
-          }),
-        }),
+      handler: async (input) => {
+        const page = await store.readNotesPage({
+          workspace: input.workspace ?? agent.workspace,
+          channel: input.channel,
+          pinnedOnly: input.pinned_only,
+          query: input.query,
+          limit: input.limit,
+          offset: input.offset,
+        });
+        return json({ notes: page.results, total: page.total, has_more: page.has_more });
+      },
     }),
     communicationTool({
       name: "pin_note",
@@ -930,20 +951,24 @@ export function createCommunicationTools(
     communicationTool({
       name: "list_locks",
       description:
-        "List active or expired workspace-scoped locks. Check this before editing shared files and include expired locks when auditing stale coordination state.",
+        "List active or expired workspace-scoped locks. Check this before editing shared files and include expired locks when auditing stale coordination state. Use offset and limit to page through a large lock set; total and has_more describe the full result set.",
       inputSchema: z.object({
         workspace: workspaceSchema,
         resource: z.string().min(1).optional(),
         include_expired: z.boolean().optional(),
+        limit: z.number().int().min(1).max(200).optional(),
+        offset: z.number().int().min(0).optional(),
       }),
-      handler: async (input) =>
-        json({
-          locks: await store.listLocks({
-            workspace: input.workspace ?? agent.workspace,
-            resource: input.resource,
-            includeExpired: input.include_expired,
-          }),
-        }),
+      handler: async (input) => {
+        const page = await store.listLocksPage({
+          workspace: input.workspace ?? agent.workspace,
+          resource: input.resource,
+          includeExpired: input.include_expired,
+          limit: input.limit,
+          offset: input.offset,
+        });
+        return json({ locks: page.results, total: page.total, has_more: page.has_more });
+      },
     }),
   ];
 }
