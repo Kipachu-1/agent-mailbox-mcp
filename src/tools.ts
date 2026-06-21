@@ -219,7 +219,7 @@ export function createCommunicationTools(
         offset: z.number().int().min(0).optional(),
       }),
       handler: async (input) => {
-        const page = await store.listAgentsPage(input.workspace, input.limit, input.offset);
+        const page = await store.listAgentsPage(input.workspace, input.limit ?? 50, input.offset);
         return json({ agents: page.results, total: page.total, has_more: page.has_more });
       },
     }),
@@ -983,7 +983,7 @@ export function createCommunicationTools(
           workspace: input.workspace ?? agent.workspace,
           resource: input.resource,
           includeExpired: input.include_expired,
-          limit: input.limit,
+          limit: input.limit ?? 50,
           offset: input.offset,
         });
         return json({ locks: page.results, total: page.total, has_more: page.has_more });

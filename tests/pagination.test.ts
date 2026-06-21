@@ -451,7 +451,7 @@ test("inbox tool returns {messages, total, has_more} and honors offset passthrou
   }
 });
 
-test("list_locks tool honors offset without limit", async () => {
+test("list_locks tool honors offset with default limit 50", async () => {
   const { path } = tempDb();
   const store = await LocalCommsStore.openSqlite(path);
   try {
@@ -466,16 +466,75 @@ test("list_locks tool honors offset without limit", async () => {
     }
     const tools = createCommunicationTools(store, { id: agent, name: "Codex", workspace: WORKSPACE });
 
-    // offset without limit: skips the first 2, returns the rest
+    // offset without explicit limit: default limit 50, skips first 2
     const page = await runTool(tools, "list_locks", { workspace: WORKSPACE, offset: 2 });
     expect(page.locks).toHaveLength(3);
     expect(page.total).toBe(5);
     expect(page.has_more).toBe(false);
 
-    // offset 0 without limit: returns all (backward compatible)
+    // no pagination params: default limit 50 returns all (5 < 50)
     const all = await runTool(tools, "list_locks", { workspace: WORKSPACE });
     expect(all.locks).toHaveLength(5);
     expect(all.has_more).toBe(false);
+  } finally {
+    await store.close();
+  }
+});
+
+test("list_locks tool defaults to limit 50 against >50 rows", async () => {
+  const { path } = tempDb();
+  const store = await LocalCommsStore.openSqlite(path);
+  try {
+    const agent = "codex";
+    for (let i = 0; i < 55; i++) {
+      await store.acquireLock({
+        agentId: agent,
+        workspace: WORKSPACE,
+        resource: `lock-${i}`,
+        ttlSeconds: 3600,
+      });
+    }
+    const tools = createCommunicationTools(store, { id: agent, name: "Codex", workspace: WORKSPACE });
+
+    // no limit: defaults to 50, has_more true, total is 55
+    const page = await runTool(tools, "list_locks", { workspace: WORKSPACE });
+    expect(page.locks).toHaveLength(50);
+    expect(page.total).toBe(55);
+    expect(page.has_more).toBe(true);
+
+    // page 2: offset 50 returns the remaining 5
+    const page2 = await runTool(tools, "list_locks", { workspace: WORKSPACE, offset: 50 });
+    expect(page2.locks).toHaveLength(5);
+    expect(page2.total).toBe(55);
+    expect(page2.has_more).toBe(false);
+  } finally {
+    await store.close();
+  }
+});
+
+test("list_agents tool defaults to limit 50 against >50 rows", async () => {
+  const { path } = tempDb();
+  const store = await LocalCommsStore.openSqlite(path);
+  try {
+    for (let i = 0; i < 55; i++) {
+      await store.registerAgent({ id: `agent-${i}`, name: `Agent ${i}`, workspace: WORKSPACE });
+    }
+    const tools = createCommunicationTools(
+      store,
+      { id: "agent-0", name: "Agent 0", workspace: WORKSPACE },
+    );
+
+    // no limit: defaults to 50, has_more true, total is 55
+    const page = await runTool(tools, "list_agents", { workspace: WORKSPACE });
+    expect(page.agents).toHaveLength(50);
+    expect(page.total).toBe(55);
+    expect(page.has_more).toBe(true);
+
+    // page 2: offset 50 returns the remaining 5
+    const page2 = await runTool(tools, "list_agents", { workspace: WORKSPACE, offset: 50 });
+    expect(page2.agents).toHaveLength(5);
+    expect(page2.total).toBe(55);
+    expect(page2.has_more).toBe(false);
   } finally {
     await store.close();
   }
