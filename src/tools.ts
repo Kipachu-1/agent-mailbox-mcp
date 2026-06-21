@@ -219,6 +219,10 @@ export function createCommunicationTools(
         offset: z.number().int().min(0).optional(),
       }),
       handler: async (input) => {
+        // Default limit at the tool layer: the store *Page methods keep "return
+        // all when limit omitted" for internal callers (session_start, admin
+        // API, MCP resources), but the MCP tool contract defaults to 50 like
+        // the other 6 list tools.
         const page = await store.listAgentsPage(input.workspace, input.limit ?? 50, input.offset);
         return json({ agents: page.results, total: page.total, has_more: page.has_more });
       },
@@ -983,6 +987,9 @@ export function createCommunicationTools(
           workspace: input.workspace ?? agent.workspace,
           resource: input.resource,
           includeExpired: input.include_expired,
+          // Default limit at the tool layer: the store *Page methods keep
+          // "return all when limit omitted" for internal callers, but the MCP
+          // tool contract defaults to 50 like the other 6 list tools.
           limit: input.limit ?? 50,
           offset: input.offset,
         });
