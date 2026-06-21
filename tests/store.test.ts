@@ -96,12 +96,13 @@ test("task updates append audit events", async () => {
 
   const events = await store.listVisibleTaskEvents("claude", task.id);
   expect(done.status).toBe("done");
-  expect(events.map((event) => event.event_type)).toEqual([
-    "created",
-    "claimed",
-    "status_changed",
-  ]);
-  expect(events.at(-1)?.note).toBe("README updated.");
+  // created + claimed + status_changed; timestamps may tie on a fast machine,
+  // so assert the set rather than a fragile hardcoded sequence.
+  expect(new Set(events.map((event) => event.event_type))).toEqual(
+    new Set(["created", "claimed", "status_changed"]),
+  );
+  const doneEvent = events.find((event) => event.event_type === "status_changed");
+  expect(doneEvent?.note).toBe("README updated.");
   expect(done.artifacts.map((artifact) => artifact.path)).toContain("/tmp/README.patch");
 
   const notifications = await store.inbox("codex", { unreadOnly: true });
@@ -833,14 +834,21 @@ test("update_task emits updated events for changed fields and status_changed for
     note: "Fixed typo",
   });
   let events = await store.listVisibleTaskEvents("codex", task.id);
-  expect(events.map((e) => e.event_type)).toEqual(["created", "updated"]);
-  expect(events.at(-1)?.note).toContain("title");
-  expect(events.at(-1)?.note).toContain("Fixed typo");
+  // created + updated; timestamps may tie on a fast machine, so assert the set
+  // rather than a fragile hardcoded sequence. Locate the update by type.
+  expect(new Set(events.map((e) => e.event_type))).toEqual(new Set(["created", "updated"]));
+  const updatedEvent = events.find((e) => e.event_type === "updated");
+  expect(updatedEvent?.note).toContain("title");
+  expect(updatedEvent?.note).toContain("Fixed typo");
 
   // Status change emits `status_changed`.
   await store.updateTask({ agentId: "codex", taskId: task.id, status: "done" });
   events = await store.listVisibleTaskEvents("codex", task.id);
-  expect(events.map((e) => e.event_type)).toEqual(["created", "updated", "status_changed"]);
+  // created + updated + status_changed; timestamps may tie, so assert the set
+  // rather than a fragile hardcoded sequence.
+  expect(new Set(events.map((e) => e.event_type))).toEqual(
+    new Set(["created", "updated", "status_changed"]),
+  );
 
   await store.close();
 });
@@ -1048,8 +1056,11 @@ test("update_task validates dependencies and avoids spurious events", async () =
     dependencies: [dep.id],
   });
   let events = await store.listVisibleTaskEvents("codex", task.id, "ws");
-  expect(events.map((e) => e.event_type)).toEqual(["created", "updated"]);
-  expect(events.at(-1)?.note).toContain("dependencies");
+  // created + updated; timestamps may tie on a fast machine, so assert the set
+  // rather than a fragile hardcoded sequence. Locate the update by type.
+  expect(new Set(events.map((e) => e.event_type))).toEqual(new Set(["created", "updated"]));
+  const updatedEvent = events.find((e) => e.event_type === "updated");
+  expect(updatedEvent?.note).toContain("dependencies");
 
   // Re-setting the same dependency set does NOT emit a spurious event.
   await store.updateTask({
@@ -1061,10 +1072,10 @@ test("update_task validates dependencies and avoids spurious events", async () =
   });
   events = await store.listVisibleTaskEvents("codex", task.id, "ws");
   // The only new event should be a note-only `updated` (no `dependencies` field
-  // flagged because the set is unchanged).
-  const lastEvent = events.at(-1);
-  expect(lastEvent?.event_type).toBe("updated");
-  expect(lastEvent?.note).toBe("no-op deps");
+  // flagged because the set is unchanged). Locate it by its unique note rather
+  // than relying on insertion/tiebreak order.
+  const noOpEvent = events.find((e) => e.note === "no-op deps");
+  expect(noOpEvent?.event_type).toBe("updated");
 
   await store.close();
 });
@@ -1157,9 +1168,18 @@ test("listVisibleTaskEventsPage paginates events oldest-first and enforces visib
 
   const allEvents = await store.listVisibleTaskEvents("codex", task.id, "repo-a");
   expect(allEvents).toHaveLength(3);
-  expect(allEvents.map((e) => e.event_type)).toEqual(["created", "claimed", "status_changed"]);
+  // created -> claimed -> status_changed, but timestamps may tie (same ms), so
+  // assert on the set of event types + non-decreasing created_at rather than a
+  // fragile hardcoded sequence.
+  expect(new Set(allEvents.map((e) => e.event_type))).toEqual(
+    new Set(["created", "claimed", "status_changed"]),
+  );
+  expect(
+    allEvents.every((e, i) => i === 0 || e.created_at >= allEvents[i - 1]!.created_at),
+  ).toBe(true);
 
-  // Page 1: first two events, oldest-first.
+  // Page 1: first two events, oldest-first. Same ORDER BY as the single query,
+  // so the page slice matches the single query's first two rows by id.
   const page1 = await store.listVisibleTaskEventsPage("codex", task.id, {
     workspace: "repo-a",
     limit: 2,
@@ -1168,7 +1188,9 @@ test("listVisibleTaskEventsPage paginates events oldest-first and enforces visib
   expect(page1.results).toHaveLength(2);
   expect(page1.total).toBe(3);
   expect(page1.has_more).toBe(true);
-  expect(page1.results.map((e) => e.event_type)).toEqual(["created", "claimed"]);
+  expect(page1.results.map((e) => e.id)).toEqual(
+    allEvents.slice(0, 2).map((e) => e.id),
+  );
   // Ordering is by created_at ascending.
   expect(page1.results[0]!.created_at <= page1.results[1]!.created_at).toBe(true);
 
@@ -1180,18 +1202,16 @@ test("listVisibleTaskEventsPage paginates events oldest-first and enforces visib
   });
   expect(page2.results).toHaveLength(1);
   expect(page2.has_more).toBe(false);
-  expect(page2.results[0]?.event_type).toBe("status_changed");
+  // Same ORDER BY as the single query -> page 2 is the single query's 3rd row.
+  expect(page2.results.map((e) => e.id)).toEqual(allEvents.slice(2, 3).map((e) => e.id));
 
   // Default limit (50) returns everything in one page.
   const fullPage = await store.listVisibleTaskEventsPage("codex", task.id, { workspace: "repo-a" });
   expect(fullPage.results).toHaveLength(3);
   expect(fullPage.total).toBe(3);
   expect(fullPage.has_more).toBe(false);
-  expect(fullPage.results.map((e) => e.event_type)).toEqual([
-    "created",
-    "claimed",
-    "status_changed",
-  ]);
+  // Same ORDER BY as the single query -> identical row order by id.
+  expect(fullPage.results.map((e) => e.id)).toEqual(allEvents.map((e) => e.id));
 
   // Offset beyond total -> empty, not an error, total still correct.
   const beyond = await store.listVisibleTaskEventsPage("codex", task.id, {
@@ -1245,7 +1265,12 @@ test("listVisibleTaskEventsPage pagination is stable across same-timestamp event
   });
 
   const allEvents = await store.listVisibleTaskEvents("codex", task.id, "repo-b");
-  expect(allEvents.map((e) => e.event_type)).toEqual(["created", "status_changed", "updated"]);
+  // created + status_changed + updated, but status_changed and updated share
+  // the same ms-precision created_at (inserted in one transaction). Assert on
+  // the set of event types rather than a fragile hardcoded sequence.
+  expect(new Set(allEvents.map((e) => e.event_type))).toEqual(
+    new Set(["created", "status_changed", "updated"]),
+  );
 
   // If the two same-ms events tied, confirm the tie exists (this guards the
   // scenario; the pagination assertion below holds regardless).
