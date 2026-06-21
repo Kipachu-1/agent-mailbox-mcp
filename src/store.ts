@@ -31,6 +31,7 @@ import type {
   LockRecord,
   MessageRecord,
   NoteRecord,
+  Paginated,
   ReadNotesOptions,
   RegisterAgentInput,
   ReplyMessageInput,
@@ -63,6 +64,7 @@ export type {
   MessageKind,
   MessageRecord,
   NoteRecord,
+  Paginated,
   ReadNotesOptions,
   RegisterAgentInput,
   ReplyMessageInput,
@@ -136,8 +138,20 @@ export class LocalCommsStore {
     return this.registerAgent(input);
   }
 
-  async listAgents(workspace?: string): Promise<AgentRecord[]> {
-    return agentsStore.listAgents(this.context(), workspace);
+  async listAgents(
+    workspace?: string,
+    limitValue?: number,
+    offsetValue?: number,
+  ): Promise<AgentRecord[]> {
+    return agentsStore.listAgents(this.context(), workspace, limitValue, offsetValue);
+  }
+
+  async listAgentsPage(
+    workspace?: string,
+    limitValue?: number,
+    offsetValue?: number,
+  ): Promise<Paginated<AgentRecord>> {
+    return agentsStore.listAgentsPaginated(this.context(), workspace, limitValue, offsetValue);
   }
 
   async whoIsOnline(workspace?: string, activeWithinSeconds = 300): Promise<AgentRecord[]> {
@@ -160,6 +174,13 @@ export class LocalCommsStore {
     return messagesStore.inbox(this.context(), agentId, options);
   }
 
+  async inboxPage(
+    agentId: string,
+    options: InboxOptions = {},
+  ): Promise<Paginated<MessageRecord>> {
+    return messagesStore.inboxPaginated(this.context(), agentId, options);
+  }
+
   async readMessage(
     agentId: string,
     messageId: string,
@@ -175,12 +196,35 @@ export class LocalCommsStore {
     return messagesStore.searchMessages(this.context(), agentId, options);
   }
 
+  async searchMessagesPage(
+    agentId: string,
+    options: SearchMessagesOptions,
+  ): Promise<Paginated<MessageRecord>> {
+    return messagesStore.searchMessagesPaginated(this.context(), agentId, options);
+  }
+
   async listThreads(
     agentId: string,
     workspace?: string,
     limitValue?: number,
+    offsetValue?: number,
   ): Promise<ThreadRecord[]> {
-    return messagesStore.listThreads(this.context(), agentId, workspace, limitValue);
+    return messagesStore.listThreads(this.context(), agentId, workspace, limitValue, offsetValue);
+  }
+
+  async listThreadsPage(
+    agentId: string,
+    workspace?: string,
+    limitValue?: number,
+    offsetValue?: number,
+  ): Promise<Paginated<ThreadRecord>> {
+    return messagesStore.listThreadsPaginated(
+      this.context(),
+      agentId,
+      workspace,
+      limitValue,
+      offsetValue,
+    );
   }
 
   async getThread(
@@ -188,8 +232,33 @@ export class LocalCommsStore {
     threadId: string,
     workspace?: string,
     limitValue?: number,
+    offsetValue?: number,
   ): Promise<MessageRecord[]> {
-    return messagesStore.getThread(this.context(), agentId, threadId, workspace, limitValue);
+    return messagesStore.getThread(
+      this.context(),
+      agentId,
+      threadId,
+      workspace,
+      limitValue,
+      offsetValue,
+    );
+  }
+
+  async getThreadPage(
+    agentId: string,
+    threadId: string,
+    workspace?: string,
+    limitValue?: number,
+    offsetValue?: number,
+  ): Promise<Paginated<MessageRecord>> {
+    return messagesStore.getThreadPaginated(
+      this.context(),
+      agentId,
+      threadId,
+      workspace,
+      limitValue,
+      offsetValue,
+    );
   }
 
   async createTask(input: CreateTaskInput): Promise<TaskRecord> {
@@ -198,6 +267,13 @@ export class LocalCommsStore {
 
   async listTasks(agentId: string, options: ListTasksOptions = {}): Promise<TaskRecord[]> {
     return tasksStore.listTasks(this.context(), agentId, options);
+  }
+
+  async listTasksPage(
+    agentId: string,
+    options: ListTasksOptions = {},
+  ): Promise<Paginated<TaskRecord>> {
+    return tasksStore.listTasksPaginated(this.context(), agentId, options);
   }
 
   async listAllTasks(
@@ -235,6 +311,10 @@ export class LocalCommsStore {
     return notesStore.readNotes(this.context(), options);
   }
 
+  async readNotesPage(options: ReadNotesOptions = {}): Promise<Paginated<NoteRecord>> {
+    return notesStore.readNotesPaginated(this.context(), options);
+  }
+
   async listAllNotes(
     options: Omit<ReadNotesOptions, "workspace" | "channel" | "query"> = {},
   ): Promise<NoteRecord[]> {
@@ -263,6 +343,10 @@ export class LocalCommsStore {
 
   async listLocks(options: ListLocksOptions = {}): Promise<LockRecord[]> {
     return locksStore.listLocks(this.context(), options);
+  }
+
+  async listLocksPage(options: ListLocksOptions = {}): Promise<Paginated<LockRecord>> {
+    return locksStore.listLocksPaginated(this.context(), options);
   }
 
   async listAllLocks(options: Pick<ListLocksOptions, "includeExpired"> = {}): Promise<LockRecord[]> {

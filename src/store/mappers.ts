@@ -157,6 +157,17 @@ export function limit(value: number | undefined): number {
   return Math.min(Math.max(Math.trunc(value), 1), 200);
 }
 
+export function offset(value: number | undefined): number {
+  if (!value || Number.isNaN(value)) {
+    return 0;
+  }
+  return Math.max(Math.trunc(value), 0);
+}
+
+export function hasMore(offsetValue: number, resultCount: number, total: number): boolean {
+  return offsetValue + resultCount < total;
+}
+
 export function ttlSeconds(value: number | undefined): number {
   if (!value || Number.isNaN(value)) {
     return 900;

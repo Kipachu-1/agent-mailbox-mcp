@@ -3,15 +3,17 @@ import { caseInsensitiveLike, type StoreContext, type StoreValue } from "./conte
 import {
   emptyToNull,
   encodeJson,
+  hasMore,
   isoNow,
   limit,
   mapNote,
+  offset,
   workspaceOf,
   type NoteRow,
 } from "./mappers";
 import { inbox } from "./messages";
 import { listTasks } from "./tasks";
-import type { NoteRecord, ReadNotesOptions, WriteNoteInput } from "./types";
+import type { NoteRecord, Paginated, ReadNotesOptions, WriteNoteInput } from "./types";
 
 export async function writeNote(ctx: StoreContext, input: WriteNoteInput): Promise<NoteRecord> {
   const workspace = workspaceOf(input.workspace);
@@ -70,10 +72,48 @@ export async function readNotes(
   ctx: StoreContext,
   options: ReadNotesOptions = {},
 ): Promise<NoteRecord[]> {
+  const { clauses, params } = readNotesWhere(ctx, options);
+  const rows = await ctx.all<NoteRow>(
+    `SELECT * FROM notes
+     WHERE ${clauses.join(" AND ")}
+     ORDER BY pinned DESC, updated_at DESC
+     LIMIT ? OFFSET ?`,
+    [...params, limit(options.limit), offset(options.offset)],
+  );
+  return Promise.all(rows.map((row) => noteWithRelations(ctx, row)));
+}
+
+export async function readNotesPaginated(
+  ctx: StoreContext,
+  options: ReadNotesOptions = {},
+): Promise<Paginated<NoteRecord>> {
+  const { clauses, params } = readNotesWhere(ctx, options);
+  const offsetValue = offset(options.offset);
+  const [rows, totalRow] = await Promise.all([
+    ctx.all<NoteRow>(
+      `SELECT * FROM notes
+       WHERE ${clauses.join(" AND ")}
+       ORDER BY pinned DESC, updated_at DESC
+       LIMIT ? OFFSET ?`,
+      [...params, limit(options.limit), offsetValue],
+    ),
+    ctx.get<{ c: number }>(
+      `SELECT COUNT(*) AS c FROM notes WHERE ${clauses.join(" AND ")}`,
+      params,
+    ),
+  ]);
+  const results = await Promise.all(rows.map((row) => noteWithRelations(ctx, row)));
+  const total = Number(totalRow?.c ?? 0);
+  return { results, total, has_more: hasMore(offsetValue, results.length, total) };
+}
+
+function readNotesWhere(
+  ctx: Pick<StoreContext, "dialect">,
+  options: ReadNotesOptions,
+): { clauses: string[]; params: StoreValue[] } {
   const workspace = workspaceOf(options.workspace);
   const clauses = ["workspace = ?"];
   const params: StoreValue[] = [workspace];
-
   if (options.channel) {
     clauses.push("channel = ?");
     params.push(options.channel);
@@ -85,16 +125,7 @@ export async function readNotes(
     clauses.push(`(${caseInsensitiveLike(ctx, "title")} OR ${caseInsensitiveLike(ctx, "body")})`);
     params.push(`%${options.query}%`, `%${options.query}%`);
   }
-
-  params.push(limit(options.limit));
-  const rows = await ctx.all<NoteRow>(
-    `SELECT * FROM notes
-     WHERE ${clauses.join(" AND ")}
-     ORDER BY pinned DESC, updated_at DESC
-     LIMIT ?`,
-    params,
-  );
-  return Promise.all(rows.map((row) => noteWithRelations(ctx, row)));
+  return { clauses, params };
 }
 
 export async function listAllNotes(

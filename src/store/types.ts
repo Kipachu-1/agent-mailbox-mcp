@@ -3,6 +3,18 @@ export type TaskStatus = "open" | "claimed" | "done" | "blocked" | "cancelled";
 export type ArtifactType = "file" | "url" | "diff" | "screenshot" | "log" | "command" | "other";
 export type ArtifactOwnerType = "message" | "task" | "note";
 
+/**
+ * Paginated result envelope returned by list tools.
+ * - `results`: the page of rows (already mapped to records).
+ * - `total`: count of all rows matching the filter, ignoring offset/limit.
+ * - `has_more`: true iff `offset + results.length < total`.
+ */
+export interface Paginated<T> {
+  results: T[];
+  total: number;
+  has_more: boolean;
+}
+
 export interface AgentRecord {
   id: string;
   name: string;
@@ -184,6 +196,7 @@ export interface InboxOptions {
   channel?: string;
   threadId?: string;
   limit?: number;
+  offset?: number;
 }
 
 export interface SearchMessagesOptions {
@@ -191,6 +204,7 @@ export interface SearchMessagesOptions {
   query: string;
   channel?: string;
   limit?: number;
+  offset?: number;
 }
 
 export interface CreateTaskInput {
@@ -218,6 +232,7 @@ export interface ListTasksOptions {
   parentTaskId?: string;
   staleAfterSeconds?: number;
   limit?: number;
+  offset?: number;
 }
 
 export interface UpdateTaskInput {
@@ -257,6 +272,7 @@ export interface ReadNotesOptions {
   pinnedOnly?: boolean;
   query?: string;
   limit?: number;
+  offset?: number;
 }
 
 export interface AcquireLockInput {
@@ -271,6 +287,8 @@ export interface ListLocksOptions {
   workspace?: string;
   includeExpired?: boolean;
   resource?: string;
+  limit?: number;
+  offset?: number;
 }
 
 export interface CreateAccessKeyInput {
