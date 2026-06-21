@@ -376,6 +376,16 @@ export async function getVisibleTaskForAgent(
   return row ? taskWithRelations(ctx, row) : null;
 }
 
+export async function getVisibleTask(
+  ctx: StoreContext,
+  agentId: string,
+  taskId: string,
+  workspace?: string,
+): Promise<TaskRecord | null> {
+  const scope = workspaceOf(workspace);
+  return getVisibleTaskForAgent(ctx, agentId, taskId, scope);
+}
+
 export async function taskWithRelations(ctx: StoreContext, row: TaskRow): Promise<TaskRecord> {
   return {
     ...mapTask(row),

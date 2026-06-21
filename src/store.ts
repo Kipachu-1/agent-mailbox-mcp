@@ -295,6 +295,14 @@ export class LocalCommsStore {
     return tasksStore.updateTask(this.context(), input);
   }
 
+  async getVisibleTask(
+    agentId: string,
+    taskId: string,
+    workspace?: string,
+  ): Promise<TaskRecord | null> {
+    return tasksStore.getVisibleTask(this.context(), agentId, taskId, workspace);
+  }
+
   async listVisibleTaskEvents(
     agentId: string,
     taskId: string,

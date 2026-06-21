@@ -244,6 +244,44 @@ test(
       expect(JSON.stringify(updated.structuredContent)).toContain("status_changed");
       expect(JSON.stringify(updated.structuredContent)).toContain("/tmp/review.log");
 
+      const fetchedTask = await agentB.client.callTool({
+        name: "get_task",
+        arguments: {
+          task_id: createdTask.id,
+        },
+      });
+      expect(fetchedTask.isError).not.toBe(true);
+      const fetchedContent = fetchedTask.structuredContent as {
+        task: { id: string; status: string; artifacts: { path: string }[] };
+        events: { event_type: string }[];
+      };
+      expect(fetchedContent.task.id).toBe(createdTask.id);
+      expect(fetchedContent.task.status).toBe("done");
+      expect(fetchedContent.task.artifacts.map((artifact) => artifact.path)).toContain(
+        "/tmp/review.log",
+      );
+      expect(fetchedContent.events.map((event) => event.event_type)).toContain("status_changed");
+
+      // get_task is read-only: a second fetch must not append any audit events.
+      const refetched = await agentB.client.callTool({
+        name: "get_task",
+        arguments: {
+          task_id: createdTask.id,
+        },
+      });
+      expect(
+        (refetched.structuredContent as { events: unknown[] }).events.length,
+      ).toBe(fetchedContent.events.length);
+
+      // A missing or non-visible task returns a clear error.
+      const missingTask = await agentB.client.callTool({
+        name: "get_task",
+        arguments: {
+          task_id: "no-such-task",
+        },
+      });
+      expect(missingTask.isError).toBe(true);
+
       const lock = await agentA.client.callTool({
         name: "acquire_lock",
         arguments: {
@@ -336,6 +374,62 @@ test(
   },
   15_000,
 );
+
+test("get_task does not leak tasks across workspaces", async () => {
+  const server = await startTestServer();
+
+  const fullstackKey = await createAccessKey(server, {
+    name: "Fullstack agent",
+    agent_id: "agent-fullstack",
+    workspace: "fullstack",
+  });
+  const otherKey = await createAccessKey(server, {
+    name: "Other agent",
+    agent_id: "agent-other",
+    workspace: "other",
+  });
+
+  const fullstack = createHttpClient(server.url, fullstackKey.token, "fullstack-client");
+  const other = createHttpClient(server.url, otherKey.token, "other-client");
+
+  try {
+    await fullstack.client.connect(fullstack.transport);
+    await other.client.connect(other.transport);
+
+    const created = await fullstack.client.callTool({
+      name: "create_task",
+      arguments: {
+        title: "Fullstack-only task",
+        assignee_id: "agent-fullstack",
+      },
+    });
+    const createdTask = (created.structuredContent as { task: { id: string } }).task;
+
+    // The creator sees the task.
+    const visible = await fullstack.client.callTool({
+      name: "get_task",
+      arguments: { task_id: createdTask.id },
+    });
+    expect(visible.isError).not.toBe(true);
+
+    // An agent in a different workspace gets a not-found error, not the task data.
+    const leaked = await other.client.callTool({
+      name: "get_task",
+      arguments: { task_id: createdTask.id },
+    });
+    expect(leaked.isError).toBe(true);
+    expect(JSON.stringify(leaked)).not.toContain("Fullstack-only task");
+  } finally {
+    if (fullstack.transport.sessionId) {
+      await fullstack.transport.terminateSession();
+    }
+    if (other.transport.sessionId) {
+      await other.transport.terminateSession();
+    }
+    await fullstack.client.close();
+    await other.client.close();
+  }
+});
 
 test("streamable HTTP rejects missing and mismatched bearer tokens", async () => {
   const server = await startTestServer();
