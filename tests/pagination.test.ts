@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LocalCommsStore } from "../src/store";
+import { createCommunicationTools } from "../src/tools";
 
 const tempDirs: string[] = [];
 
@@ -374,6 +375,106 @@ test("list_locks without limit is backward compatible (returns all)", async () =
     const all = await store.listLocksPage({ workspace: WORKSPACE });
     expect(all.results).toHaveLength(5);
     expect(all.total).toBe(5);
+    expect(all.has_more).toBe(false);
+  } finally {
+    await store.close();
+  }
+});
+
+async function runTool(
+  tools: ReturnType<typeof createCommunicationTools>,
+  name: string,
+  input: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const tool = tools.find((item) => item.name === name);
+  expect(tool).toBeDefined();
+  const output = (await tool!.run(input)) as { result: Record<string, unknown> };
+  return output.result;
+}
+
+test("inbox tool returns {messages, total, has_more} and honors offset passthrough", async () => {
+  const { path } = tempDb();
+  const store = await LocalCommsStore.openSqlite(path);
+  try {
+    for (let i = 0; i < 5; i++) {
+      await store.sendMessage({
+        senderId: "codex",
+        workspace: WORKSPACE,
+        channel: "handoffs",
+        body: `tool message ${i}`,
+      });
+    }
+    const tools = createCommunicationTools(
+      store,
+      { id: "codex", name: "Codex", workspace: WORKSPACE },
+    );
+
+    // page 1: limit 2, offset 0
+    const page1 = await runTool(tools, "inbox", {
+      workspace: WORKSPACE,
+      channel: "handoffs",
+      limit: 2,
+      offset: 0,
+    });
+    expect(page1.messages).toBeArray();
+    expect(page1.messages).toHaveLength(2);
+    expect(page1.total).toBe(5);
+    expect(page1.has_more).toBe(true);
+
+    // page 2: offset 4 — last message, has_more false
+    const page2 = await runTool(tools, "inbox", {
+      workspace: WORKSPACE,
+      channel: "handoffs",
+      limit: 2,
+      offset: 4,
+    });
+    expect(page2.messages).toHaveLength(1);
+    expect(page2.has_more).toBe(false);
+
+    // no pagination params: backward-compatible default (limit 50, offset 0)
+    const all = await runTool(tools, "inbox", {
+      workspace: WORKSPACE,
+      channel: "handoffs",
+    });
+    expect(all.messages).toHaveLength(5);
+    expect(all.has_more).toBe(false);
+    expect(all.total).toBe(5);
+
+    // pages don't overlap
+    const ids = [
+      ...((page1.messages as { id: string }[]) ?? []),
+      ...((page2.messages as { id: string }[]) ?? []),
+    ].map((m) => m.id);
+    expect(new Set(ids).size).toBe(3);
+  } finally {
+    await store.close();
+  }
+});
+
+test("list_locks tool honors offset without limit", async () => {
+  const { path } = tempDb();
+  const store = await LocalCommsStore.openSqlite(path);
+  try {
+    const agent = "codex";
+    for (let i = 0; i < 5; i++) {
+      await store.acquireLock({
+        agentId: agent,
+        workspace: WORKSPACE,
+        resource: `res-${i}`,
+        ttlSeconds: 3600,
+      });
+    }
+    const tools = createCommunicationTools(store, { id: agent, name: "Codex", workspace: WORKSPACE });
+
+    // offset without limit: skips the first 2, returns the rest
+    const page = await runTool(tools, "list_locks", { workspace: WORKSPACE, offset: 2 });
+    expect(page.locks).toHaveLength(3);
+    expect(page.total).toBe(5);
+    expect(page.has_more).toBe(false);
+
+    // offset 0 without limit: returns all (backward compatible)
+    const all = await runTool(tools, "list_locks", { workspace: WORKSPACE });
+    expect(all.locks).toHaveLength(5);
     expect(all.has_more).toBe(false);
   } finally {
     await store.close();

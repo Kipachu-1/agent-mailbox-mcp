@@ -1,4 +1,4 @@
-import type { StoreContext, StoreValue } from "./context";
+import type { StoreContext, StoreDialect, StoreValue } from "./context";
 import {
   emptyToNull,
   hasMore,
@@ -81,7 +81,7 @@ export async function listLocks(
   options: ListLocksOptions = {},
 ): Promise<LockRecord[]> {
   const { clauses, params } = listLocksWhere(options);
-  const suffix = locksLimitOffset(options.limit, options.offset);
+  const suffix = locksLimitOffset(ctx.dialect, options.limit, options.offset);
   return (await ctx.all<LockRow>(
     `SELECT * FROM locks
      WHERE ${clauses.join(" AND ")}
@@ -96,7 +96,7 @@ export async function listLocksPaginated(
 ): Promise<Paginated<LockRecord>> {
   const { clauses, params } = listLocksWhere(options);
   const offsetValue = offset(options.offset);
-  const suffix = locksLimitOffset(options.limit, offsetValue);
+  const suffix = locksLimitOffset(ctx.dialect, options.limit, offsetValue);
   const [rows, totalRow] = await Promise.all([
     ctx.all<LockRow>(
       `SELECT * FROM locks
@@ -129,13 +129,25 @@ function listLocksWhere(
 }
 
 function locksLimitOffset(
+  dialect: StoreDialect,
   limitValue: number | undefined,
   offsetValue: number | undefined,
 ): { sql: string; params: StoreValue[] } {
+  // `limit` is optional for locks (prior behavior returned all rows).
+  // Apply OFFSET on its own when only offset is given so offset-without-limit
+  // doesn't silently drop the page position. SQLite requires LIMIT to use
+  // OFFSET, so emit `LIMIT -1` (no limit) there; Postgres allows bare OFFSET.
+  const resolvedOffset = offset(offsetValue);
   if (limitValue === undefined) {
-    return { sql: "", params: [] };
+    if (resolvedOffset === 0) {
+      return { sql: "", params: [] };
+    }
+    if (dialect === "sqlite") {
+      return { sql: " LIMIT -1 OFFSET ?", params: [resolvedOffset] };
+    }
+    return { sql: " OFFSET ?", params: [resolvedOffset] };
   }
-  return { sql: " LIMIT ? OFFSET ?", params: [limit(limitValue), offset(offsetValue)] };
+  return { sql: " LIMIT ? OFFSET ?", params: [limit(limitValue), resolvedOffset] };
 }
 
 export async function listAllLocks(
