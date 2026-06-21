@@ -244,6 +244,34 @@ test(
       expect(JSON.stringify(updated.structuredContent)).toContain("status_changed");
       expect(JSON.stringify(updated.structuredContent)).toContain("/tmp/review.log");
 
+      const fetchedTask = await agentB.client.callTool({
+        name: "get_task",
+        arguments: {
+          task_id: createdTask.id,
+        },
+      });
+      expect(fetchedTask.isError).not.toBe(true);
+      const fetchedContent = fetchedTask.structuredContent as {
+        task: { id: string; status: string; artifacts: { path: string }[] };
+        events: { event_type: string }[];
+      };
+      expect(fetchedContent.task.id).toBe(createdTask.id);
+      expect(fetchedContent.task.status).toBe("done");
+      expect(fetchedContent.task.artifacts.map((a) => a.path)).toContain("/tmp/review.log");
+      expect(fetchedContent.events.map((e) => e.event_type)).toEqual([
+        "created",
+        "claimed",
+        "status_changed",
+      ]);
+
+      const fetchedUnknown = await agentA.client.callTool({
+        name: "get_task",
+        arguments: {
+          task_id: "nonexistent-task-id",
+        },
+      });
+      expect(fetchedUnknown.isError).toBe(true);
+
       const lock = await agentA.client.callTool({
         name: "acquire_lock",
         arguments: {

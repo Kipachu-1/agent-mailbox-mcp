@@ -544,6 +544,23 @@ export function createCommunicationTools(
         }),
     }),
     communicationTool({
+      name: "get_task",
+      description:
+        "Fetch a single visible task by id with its dependencies, artifacts, and full audit event history. Use this to inspect a specific handoff referenced in a message or session digest without paginating through list_tasks.",
+      inputSchema: z.object({
+        workspace: workspaceSchema,
+        task_id: z.string().min(1),
+      }),
+      handler: async (input) => {
+        const { task, events } = await store.getVisibleTask(
+          agent.id,
+          input.task_id,
+          input.workspace ?? agent.workspace,
+        );
+        return json({ task, events });
+      },
+    }),
+    communicationTool({
       name: "claim_task",
       description:
         "Atomically claim an open task for the current agent. Claim only work you intend to start now, and follow with heartbeat during long-running work.",

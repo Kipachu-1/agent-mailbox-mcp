@@ -213,6 +213,21 @@ export async function listVisibleTaskEvents(
   return listTaskEvents(ctx, taskId);
 }
 
+export async function getVisibleTaskWithEvents(
+  ctx: StoreContext,
+  agentId: string,
+  taskId: string,
+  workspace?: string,
+): Promise<{ task: TaskRecord; events: TaskEventRecord[] }> {
+  const scope = workspaceOf(workspace);
+  const task = await getVisibleTaskForAgent(ctx, agentId, taskId, scope);
+  if (!task) {
+    throw new Error(`Task '${taskId}' is not visible to agent '${agentId}'.`);
+  }
+  const events = await listTaskEvents(ctx, taskId);
+  return { task, events };
+}
+
 export async function getTask(ctx: StoreContext, taskId: string): Promise<TaskRecord | null> {
   const row = await ctx.get<TaskRow>(`SELECT * FROM tasks WHERE id = ?`, [taskId]);
   return row ? taskWithRelations(ctx, row) : null;
