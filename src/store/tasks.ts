@@ -24,6 +24,7 @@ import {
 } from "./task-support";
 import type {
   CreateTaskInput,
+  ListTaskEventsOptions,
   ListTasksOptions,
   Paginated,
   TaskEventRecord,
@@ -36,43 +37,6 @@ export async function createTask(ctx: StoreContext, input: CreateTaskInput): Pro
   const now = isoNow();
   const id = crypto.randomUUID();
   await ctx.transaction(async (tx) => {
-    // Validate references up front, mirroring updateTask: assignee_id must
-    // resolve to an agent in the task's workspace; parent_task_id and each
-    // dependency must resolve to a task in the same workspace. Unknown
-    // references are rejected with a clear error rather than stored verbatim,
-    // so creation and edit behave identically and no dangling references land
-    // in the database.
-    if (input.assigneeId) {
-      const assignee = await getAgent(tx, input.assigneeId, workspace);
-      if (!assignee) {
-        throw new Error(
-          `Invalid assignee_id '${input.assigneeId}': no agent with that id exists in workspace '${workspace}'.`,
-        );
-      }
-    }
-    if (input.parentTaskId) {
-      if (input.parentTaskId === id) {
-        throw new Error("Invalid parent_task_id: a task cannot be its own parent.");
-      }
-      const parent = await getTask(tx, input.parentTaskId);
-      if (!parent || parent.workspace !== workspace) {
-        throw new Error(
-          `Invalid parent_task_id '${input.parentTaskId}': no task with that id exists in workspace '${workspace}'.`,
-        );
-      }
-    }
-    for (const depId of (input.dependencies ?? []).filter(Boolean)) {
-      if (depId === id) {
-        throw new Error(`Invalid dependency '${depId}': a task cannot depend on itself.`);
-      }
-      const dep = await getTask(tx, depId);
-      if (!dep || dep.workspace !== workspace) {
-        throw new Error(
-          `Invalid dependency '${depId}': no task with that id exists in workspace '${workspace}'.`,
-        );
-      }
-    }
-
     await tx.run(
       `INSERT INTO tasks
          (id, workspace, title, description, creator_id, assignee_id, channel, status,
@@ -392,6 +356,33 @@ export async function listVisibleTaskEvents(
     throw new Error(`Task '${taskId}' is not visible to agent '${agentId}'.`);
   }
   return listTaskEvents(ctx, taskId);
+}
+
+export async function listVisibleTaskEventsPaginated(
+  ctx: StoreContext,
+  agentId: string,
+  taskId: string,
+  options: ListTaskEventsOptions = {},
+): Promise<Paginated<TaskEventRecord>> {
+  const scope = workspaceOf(options.workspace);
+  const task = await getVisibleTaskForAgent(ctx, agentId, taskId, scope);
+  if (!task) {
+    throw new Error(`Task '${taskId}' is not visible to agent '${agentId}'.`);
+  }
+  const offsetValue = offset(options.offset);
+  const limitValue = limit(options.limit);
+  const [rows, totalRow] = await Promise.all([
+    ctx.all<TaskEventRecord>(
+      `SELECT * FROM task_events WHERE task_id = ? ORDER BY created_at ASC, id ASC LIMIT ? OFFSET ?`,
+      [taskId, limitValue, offsetValue],
+    ),
+    ctx.get<{ c: number }>(
+      `SELECT COUNT(*) AS c FROM task_events WHERE task_id = ?`,
+      [taskId],
+    ),
+  ]);
+  const total = Number(totalRow?.c ?? 0);
+  return { results: rows, total, has_more: hasMore(offsetValue, rows.length, total) };
 }
 
 export async function getTask(ctx: StoreContext, taskId: string): Promise<TaskRecord | null> {

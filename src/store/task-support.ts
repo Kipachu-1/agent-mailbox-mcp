@@ -80,7 +80,7 @@ export async function listTaskEvents(
   taskId: string,
 ): Promise<TaskEventRecord[]> {
   return ctx.all<TaskEventRecord>(
-    `SELECT * FROM task_events WHERE task_id = ? ORDER BY created_at ASC`,
+    `SELECT * FROM task_events WHERE task_id = ? ORDER BY created_at ASC, id ASC`,
     [taskId],
   );
 }

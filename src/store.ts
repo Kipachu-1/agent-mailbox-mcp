@@ -27,6 +27,7 @@ import type {
   CreateTaskInput,
   InboxOptions,
   ListLocksOptions,
+  ListTaskEventsOptions,
   ListTasksOptions,
   LockRecord,
   MessageRecord,
@@ -309,6 +310,14 @@ export class LocalCommsStore {
     workspace?: string,
   ): Promise<TaskEventRecord[]> {
     return tasksStore.listVisibleTaskEvents(this.context(), agentId, taskId, workspace);
+  }
+
+  async listVisibleTaskEventsPage(
+    agentId: string,
+    taskId: string,
+    options: ListTaskEventsOptions = {},
+  ): Promise<Paginated<TaskEventRecord>> {
+    return tasksStore.listVisibleTaskEventsPaginated(this.context(), agentId, taskId, options);
   }
 
   async writeNote(input: WriteNoteInput): Promise<NoteRecord> {

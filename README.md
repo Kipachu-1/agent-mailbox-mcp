@@ -247,6 +247,7 @@ Stale claimed tasks are reclaim candidates only after checking recent presence a
 - `claim_task`: atomically claim an open task in the current workspace.
 - `update_task`: update status and editable fields (title, description, assignee_id, channel, parent_task_id, dependencies, priority, due_at, blocked_reason, status, artifacts) with partial-update semantics. Omitted fields are left unchanged; `null` clears nullable fields. Use `assignee_id` to directly assign or reassign a task. `done`, `blocked`, and `cancelled` updates from another agent automatically notify the creator.
 - `finish_work`: update a task, optionally send a final handoff note, and release selected locks in one cleanup call.
+- `list_task_events`: read a task's audit event log (creation, status changes, updates, claims, blocks) without mutating the task. Ordered oldest-first; use `offset` and `limit` to page. Only visible tasks' events are returned.
 
 ### Notes, Artifacts, and Locks
 

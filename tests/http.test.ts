@@ -273,7 +273,30 @@ test(
         (refetched.structuredContent as { events: unknown[] }).events.length,
       ).toBe(fetchedContent.events.length);
 
-      // A missing or non-visible task returns a clear error.
+      // list_task_events reads the audit log standalone, oldest-first, without mutating.
+      const taskEvents = await agentB.client.callTool({
+        name: "list_task_events",
+        arguments: {
+          task_id: createdTask.id,
+          limit: 2,
+          offset: 0,
+        },
+      });
+      expect(taskEvents.isError).not.toBe(true);
+      const eventsContent = taskEvents.structuredContent as {
+        events: { event_type: string }[];
+        total: number;
+        has_more: boolean;
+      };
+      expect(eventsContent.total).toBe(3);
+      expect(eventsContent.has_more).toBe(true);
+      // Assert the returned events are a subset of the expected types; exact
+      // order depends on the id tiebreaker among same-ms events.
+      for (const e of eventsContent.events) {
+        expect(["created", "claimed", "status_changed"]).toContain(e.event_type);
+      }
+
+      // A non-visible task returns a clear error over MCP for both tools.
       const missingTask = await agentB.client.callTool({
         name: "get_task",
         arguments: {
@@ -281,6 +304,15 @@ test(
         },
       });
       expect(missingTask.isError).toBe(true);
+
+      const invisibleEvents = await agentA.client.callTool({
+        name: "list_task_events",
+        arguments: {
+          task_id: "no-such-task",
+        },
+      });
+      expect(invisibleEvents.isError).toBe(true);
+      expect(JSON.stringify(invisibleEvents.content)).toContain("not visible");
 
       const lock = await agentA.client.callTool({
         name: "acquire_lock",
