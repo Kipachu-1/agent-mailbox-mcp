@@ -410,7 +410,7 @@ export async function listVisibleTaskEventsPaginated(
   const limitValue = limit(options.limit);
   const [rows, totalRow] = await Promise.all([
     ctx.all<TaskEventRecord>(
-      `SELECT * FROM task_events WHERE task_id = ? ORDER BY created_at ASC LIMIT ? OFFSET ?`,
+      `SELECT * FROM task_events WHERE task_id = ? ORDER BY created_at ASC, id ASC LIMIT ? OFFSET ?`,
       [taskId, limitValue, offsetValue],
     ),
     ctx.get<{ c: number }>(
