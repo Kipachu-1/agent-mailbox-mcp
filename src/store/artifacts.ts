@@ -114,7 +114,9 @@ export async function appendArtifacts(
 /**
  * Identity key for deduplication. Two artifacts are considered the same
  * reference when they share type, path, url, and line. Label and metadata
- * are descriptive, not identity.
+ * are descriptive, not identity. Note: sparse artifacts that omit path,
+ * url, and line (e.g. type `other` with only a label) collapse to the same
+ * key, so at most one such artifact per type is kept on append.
  */
 export function artifactIdentityKey(artifact: {
   type: string;
