@@ -3,6 +3,7 @@
   "module": "src/http.ts",
   "type": "module",
   "private": true,
+  "license": "MIT",
   "scripts": {
     "cli": "bun run src/cli.ts",
     "http": "bun run src/http.ts",
