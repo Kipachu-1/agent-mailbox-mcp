@@ -15,9 +15,15 @@ export async function updatesSince(
 ): Promise<UpdatesRecord> {
   const scope = workspaceOf(workspace);
   const sinceValue = since?.trim() || "1970-01-01T00:00:00.000Z";
+  // Push the `since` predicate into the SQL WHERE clauses (exactly as the
+  // `task_events` query already does) instead of fetching a hard-capped 200
+  // rows then filtering in JS. The `since` filter lives in each store's WHERE
+  // builder (inboxWhere, listTasksWhere, readNotesWhere, listLocksWhere); the
+  // high limit ensures busy workspaces return every matching row in one pass.
+  const UPDATES_LIMIT = 1000;
   const [messages, tasks, taskEvents, notes, locks] = await Promise.all([
-    inbox(ctx, agentId, { workspace: scope, includeSent: true, limit: 200 }),
-    listTasks(ctx, agentId, { workspace: scope, limit: 200 }),
+    inbox(ctx, agentId, { workspace: scope, includeSent: true, since: sinceValue, limit: UPDATES_LIMIT }),
+    listTasks(ctx, agentId, { workspace: scope, since: sinceValue, limit: UPDATES_LIMIT }),
     ctx.all<TaskEventRecord>(
       `SELECT e.* FROM task_events e
        JOIN tasks t ON t.id = e.task_id
@@ -26,16 +32,16 @@ export async function updatesSince(
        LIMIT 200`,
       [scope, agentId, agentId, sinceValue],
     ),
-    readNotes(ctx, { workspace: scope, limit: 200 }),
-    listLocks(ctx, { workspace: scope, includeExpired: true }),
+    readNotes(ctx, { workspace: scope, since: sinceValue, limit: UPDATES_LIMIT }),
+    listLocks(ctx, { workspace: scope, includeExpired: true, since: sinceValue }),
   ]);
   return {
     since: sinceValue,
     checked_at: isoNow(),
-    messages: messages.filter((message) => message.created_at > sinceValue),
-    tasks: tasks.filter((task) => task.updated_at > sinceValue),
+    messages,
+    tasks,
     task_events: taskEvents,
-    notes: notes.filter((note) => note.updated_at > sinceValue),
-    locks: locks.filter((lock) => lock.updated_at > sinceValue),
+    notes,
+    locks,
   };
 }

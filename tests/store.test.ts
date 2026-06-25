@@ -588,6 +588,38 @@ test("watch updates only returns task events visible to the requesting agent", a
   await store.close();
 });
 
+test("watch_updates returns every matching entity on a workspace with >200 items after since", async () => {
+  const { path } = tempDb();
+  const store = await LocalCommsStore.openSqlite(path);
+  const since = new Date(Date.now() - 1000).toISOString();
+
+  // Create >200 messages, tasks, notes, and locks — all after `since`.
+  const messageCount = 210;
+  for (let i = 0; i < messageCount; i++) {
+    await store.sendMessage({ senderId: "codex", channel: "busy", body: `msg ${i}` });
+  }
+  for (let i = 0; i < messageCount; i++) {
+    await store.createTask({ creatorId: "codex", title: `task ${i}` });
+  }
+  for (let i = 0; i < messageCount; i++) {
+    await store.writeNote({ agentId: "codex", title: `note ${i}`, body: "context" });
+  }
+  for (let i = 0; i < messageCount; i++) {
+    await store.acquireLock({ agentId: "codex", resource: `lock-${i}`, ttlSeconds: 3600 });
+  }
+
+  const updates = await store.updatesSince("codex", undefined, since);
+
+  // No rows are dropped: the `since` predicate is pushed into SQL so the
+  // fetch is not capped at 200 before filtering.
+  expect(updates.messages).toHaveLength(messageCount);
+  expect(updates.tasks).toHaveLength(messageCount);
+  expect(updates.notes).toHaveLength(messageCount);
+  expect(updates.locks).toHaveLength(messageCount);
+
+  await store.close();
+});
+
 test("task updates and artifacts require owner visibility", async () => {
   const { path } = tempDb();
   const store = await LocalCommsStore.openSqlite(path);

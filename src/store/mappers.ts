@@ -154,7 +154,7 @@ export function limit(value: number | undefined): number {
   if (!value || Number.isNaN(value)) {
     return 50;
   }
-  return Math.min(Math.max(Math.trunc(value), 1), 200);
+  return Math.min(Math.max(Math.trunc(value), 1), 1000);
 }
 
 export function offset(value: number | undefined): number {
