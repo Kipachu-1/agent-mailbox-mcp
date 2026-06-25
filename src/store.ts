@@ -209,8 +209,18 @@ export class LocalCommsStore {
     workspace?: string,
     limitValue?: number,
     offsetValue?: number,
+    since?: string,
+    until?: string,
   ): Promise<ThreadRecord[]> {
-    return messagesStore.listThreads(this.context(), agentId, workspace, limitValue, offsetValue);
+    return messagesStore.listThreads(
+      this.context(),
+      agentId,
+      workspace,
+      limitValue,
+      offsetValue,
+      since,
+      until,
+    );
   }
 
   async listThreadsPage(
@@ -218,6 +228,8 @@ export class LocalCommsStore {
     workspace?: string,
     limitValue?: number,
     offsetValue?: number,
+    since?: string,
+    until?: string,
   ): Promise<Paginated<ThreadRecord>> {
     return messagesStore.listThreadsPaginated(
       this.context(),
@@ -225,6 +237,8 @@ export class LocalCommsStore {
       workspace,
       limitValue,
       offsetValue,
+      since,
+      until,
     );
   }
 

@@ -1,4 +1,4 @@
-import type { StoreContext, StoreDialect, StoreValue } from "./context";
+import { addDateRange, type StoreContext, type StoreDialect, type StoreValue } from "./context";
 import {
   emptyToNull,
   hasMore,
@@ -125,6 +125,7 @@ function listLocksWhere(
     params.push(options.resource);
   }
   addExpiryFilter(clauses, params, options.includeExpired);
+  addDateRange(clauses, params, "updated_at", options.since, options.until);
   return { clauses, params };
 }
 

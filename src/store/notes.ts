@@ -1,5 +1,5 @@
 import { appendArtifacts, listArtifacts, replaceArtifacts } from "./artifacts";
-import { caseInsensitiveLike, type StoreContext, type StoreValue } from "./context";
+import { addDateRange, caseInsensitiveLike, type StoreContext, type StoreValue } from "./context";
 import {
   emptyToNull,
   encodeJson,
@@ -125,6 +125,7 @@ function readNotesWhere(
     clauses.push(`(${caseInsensitiveLike(ctx, "title")} OR ${caseInsensitiveLike(ctx, "body")})`);
     params.push(`%${options.query}%`, `%${options.query}%`);
   }
+  addDateRange(clauses, params, "updated_at", options.since, options.until);
   return { clauses, params };
 }
 

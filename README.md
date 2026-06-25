@@ -252,7 +252,7 @@ Stale claimed tasks are reclaim candidates only after checking recent presence a
 ### Notes, Artifacts, and Locks
 
 - `write_note`: create or update a scratchpad note. Pin durable conventions.
-- `read_notes`: read notes by channel, pinned state, or search query.
+- `read_notes`: read notes by channel, pinned state, or search query. Pass `since`/`until` (ISO-8601) to limit notes to those last updated within a date range.
 - `pin_note`: pin or unpin a note.
 - `summarize_channel`: return a compact channel digest.
 - `list_artifacts`: list references attached to a message, task, or note.
@@ -329,3 +329,4 @@ bun run typecheck
 ```
 
 SQLite uses WAL mode and `busy_timeout` so multiple MCP sessions and local CLI calls can share the same database safely. Postgres integration tests are gated by `AGENT_MAILBOX_TEST_DATABASE_URL`.
+o multiple MCP sessions and local CLI calls can share the same database safely. Postgres integration tests are gated by `AGENT_MAILBOX_TEST_DATABASE_URL`.

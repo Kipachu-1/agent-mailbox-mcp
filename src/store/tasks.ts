@@ -1,7 +1,6 @@
 import { getAgent } from "./agents";
 import { insertArtifacts, listArtifacts } from "./artifacts";
-import { visibleTaskClause } from "./context";
-import type { StoreContext, StoreValue } from "./context";
+import { visibleTaskClause, addDateRange, type StoreContext, type StoreValue } from "./context";
 import {
   emptyToNull,
   encodeJson,
@@ -120,6 +119,7 @@ function listTasksWhere(
   const clauses = ["workspace = ?", visibleTaskClause()];
   const params: StoreValue[] = [workspace, agentId, agentId];
   addTaskFilters(clauses, params, options);
+  addDateRange(clauses, params, "updated_at", options.since, options.until);
   return { clauses, params };
 }
 
@@ -135,6 +135,7 @@ export async function listAllTasks(
     params.push(workspaceOf(options.workspace));
   }
   addTaskFilters(clauses, params, options);
+  addDateRange(clauses, params, "updated_at", options.since, options.until);
 
   const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
   params.push(limit(options.limit));
