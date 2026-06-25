@@ -16,6 +16,22 @@ import { LocalCommsStore, type TaskStatus } from "./store";
 
 const metadataSchema = z.record(z.string(), z.unknown()).optional();
 const workspaceSchema = z.string().min(1).optional();
+const dateRangeFields = {
+  since: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      "Optional ISO-8601 timestamp; only records at or after this instant are returned.",
+    ),
+  until: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      "Optional ISO-8601 timestamp; only records at or before this instant are returned.",
+    ),
+};
 const taskStatusSchema = z.enum(["open", "claimed", "done", "blocked", "cancelled"]);
 const artifactTypeSchema = z.enum(["file", "url", "diff", "screenshot", "log", "command", "other"]);
 const artifactSchema = z.object({
@@ -298,13 +314,14 @@ export function createCommunicationTools(
     communicationTool({
       name: "inbox",
       description:
-        "List unread or recent direct and channel messages visible to the current agent. Use unread_only for triage, then read_message after handling each item. Use offset and limit to page through a large inbox; total and has_more describe the full result set.",
+        "List unread or recent direct and channel messages visible to the current agent. Use unread_only for triage, then read_message after handling each item. Pass since/until (ISO-8601) to limit results to a date range without scanning the full inbox. Use offset and limit to page through a large inbox; total and has_more describe the full result set.",
       inputSchema: z.object({
         workspace: workspaceSchema,
         unread_only: z.boolean().optional(),
         include_sent: z.boolean().optional(),
         channel: z.string().min(1).optional(),
         thread_id: z.string().min(1).optional(),
+        ...dateRangeFields,
         limit: z.number().int().min(1).max(200).optional(),
         offset: z.number().int().min(0).optional(),
       }),
@@ -315,6 +332,8 @@ export function createCommunicationTools(
           includeSent: input.include_sent,
           channel: input.channel,
           threadId: input.thread_id,
+          since: input.since,
+          until: input.until,
           limit: input.limit,
           offset: input.offset,
         });
@@ -359,9 +378,10 @@ export function createCommunicationTools(
     communicationTool({
       name: "list_threads",
       description:
-        "List visible message threads in the current or requested workspace, ordered by recent activity. Use offset and limit to page through a large workspace; total and has_more describe the full result set.",
+        "List visible message threads in the current or requested workspace, ordered by recent activity. Pass since/until (ISO-8601) to limit threads to those containing messages within a date range. Use offset and limit to page through a large workspace; total and has_more describe the full result set.",
       inputSchema: z.object({
         workspace: workspaceSchema,
+        ...dateRangeFields,
         limit: z.number().int().min(1).max(200).optional(),
         offset: z.number().int().min(0).optional(),
       }),
@@ -371,6 +391,8 @@ export function createCommunicationTools(
           input.workspace ?? agent.workspace,
           input.limit,
           input.offset,
+          input.since,
+          input.until,
         );
         return json({ threads: page.results, total: page.total, has_more: page.has_more });
       },
@@ -539,7 +561,7 @@ export function createCommunicationTools(
     communicationTool({
       name: "list_tasks",
       description:
-        "List visible tasks by status, assignee, creator, channel, parent, recency, or stale claim age. Use stale_after_seconds to find claimed tasks, then check recent presence and message context before reclaiming or reassigning. Use offset and limit to page through a large task list; total and has_more describe the full result set.",
+        "List visible tasks by status, assignee, creator, channel, parent, recency, or stale claim age. Pass since/until (ISO-8601) to limit tasks to those last updated within a date range. Use stale_after_seconds to find claimed tasks, then check recent presence and message context before reclaiming or reassigning. Use offset and limit to page through a large task list; total and has_more describe the full result set.",
       inputSchema: z.object({
         workspace: workspaceSchema,
         status: taskStatusSchema.optional(),
@@ -548,6 +570,7 @@ export function createCommunicationTools(
         channel: z.string().min(1).optional(),
         parent_task_id: z.string().min(1).optional(),
         stale_after_seconds: z.number().int().min(60).max(2_592_000).optional(),
+        ...dateRangeFields,
         limit: z.number().int().min(1).max(200).optional(),
         offset: z.number().int().min(0).optional(),
       }),
@@ -560,6 +583,8 @@ export function createCommunicationTools(
           channel: input.channel,
           parentTaskId: input.parent_task_id,
           staleAfterSeconds: input.stale_after_seconds,
+          since: input.since,
+          until: input.until,
           limit: input.limit,
           offset: input.offset,
         });
@@ -810,12 +835,13 @@ export function createCommunicationTools(
     communicationTool({
       name: "read_notes",
       description:
-        "Read shared scratchpad notes by workspace, channel, pin state, or search query. Check pinned notes before starting work in an unfamiliar workspace. Use offset and limit to page through a large note set; total and has_more describe the full result set.",
+        "Read shared scratchpad notes by workspace, channel, pin state, or search query. Pass since/until (ISO-8601) to limit notes to those last updated within a date range. Check pinned notes before starting work in an unfamiliar workspace. Use offset and limit to page through a large note set; total and has_more describe the full result set.",
       inputSchema: z.object({
         workspace: workspaceSchema,
         channel: z.string().min(1).optional(),
         pinned_only: z.boolean().optional(),
         query: z.string().min(1).optional(),
+        ...dateRangeFields,
         limit: z.number().int().min(1).max(200).optional(),
         offset: z.number().int().min(0).optional(),
       }),
@@ -825,6 +851,8 @@ export function createCommunicationTools(
           channel: input.channel,
           pinnedOnly: input.pinned_only,
           query: input.query,
+          since: input.since,
+          until: input.until,
           limit: input.limit,
           offset: input.offset,
         });
@@ -1015,11 +1043,12 @@ export function createCommunicationTools(
     communicationTool({
       name: "list_locks",
       description:
-        "List active or expired workspace-scoped locks. Check this before editing shared files and include expired locks when auditing stale coordination state. Use offset and limit to page through a large lock set; total and has_more describe the full result set.",
+        "List active or expired workspace-scoped locks. Check this before editing shared files and include expired locks when auditing stale coordination state. Pass since/until (ISO-8601) to limit locks to those last updated within a date range. Use offset and limit to page through a large lock set; total and has_more describe the full result set.",
       inputSchema: z.object({
         workspace: workspaceSchema,
         resource: z.string().min(1).optional(),
         include_expired: z.boolean().optional(),
+        ...dateRangeFields,
         limit: z.number().int().min(1).max(200).optional(),
         offset: z.number().int().min(0).optional(),
       }),
@@ -1028,6 +1057,8 @@ export function createCommunicationTools(
           workspace: input.workspace ?? agent.workspace,
           resource: input.resource,
           includeExpired: input.include_expired,
+          since: input.since,
+          until: input.until,
           // Default limit at the tool layer: the store *Page methods keep
           // "return all when limit omitted" for internal callers, but the MCP
           // tool contract defaults to 50 like the other 6 list tools.

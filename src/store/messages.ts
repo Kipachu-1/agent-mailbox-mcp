@@ -1,5 +1,6 @@
 import { insertArtifacts, listArtifacts } from "./artifacts";
 import {
+  addDateRange,
   caseInsensitiveLike,
   doNothingOnConflict,
   insertOrIgnore,
@@ -182,6 +183,7 @@ function inboxWhere(
     clauses.push("m.sender_id != ? AND r.read_at IS NULL");
     params.push(agentId);
   }
+  addDateRange(clauses, params, "m.created_at", options.since, options.until);
   return { clauses, params };
 }
 
@@ -276,8 +278,13 @@ export async function listThreads(
   workspace?: string,
   limitValue?: number,
   offsetValue?: number,
+  since?: string,
+  until?: string,
 ): Promise<ThreadRecord[]> {
   const scope = workspace?.trim() || "default";
+  const clauses = [visibleMessageClause(true)];
+  const params: StoreValue[] = [scope, agentId, agentId];
+  addDateRange(clauses, params, "m.created_at", since, until);
   return (await ctx.all<ThreadRow>(
     `SELECT
        m.thread_id,
@@ -291,11 +298,11 @@ export async function listThreads(
          ORDER BY latest.created_at DESC LIMIT 1
        ) AS last_message_body
      FROM messages m
-     WHERE ${visibleMessageClause(true)}
+     WHERE ${clauses.join(" AND ")}
      GROUP BY m.workspace, m.thread_id
      ORDER BY last_message_at DESC
      LIMIT ? OFFSET ?`,
-    [scope, agentId, agentId, limit(limitValue), offset(offsetValue)],
+    [...params, limit(limitValue), offset(offsetValue)],
   )).map((row) => ({ ...row, message_count: Number(row.message_count) }));
 }
 
@@ -305,10 +312,14 @@ export async function listThreadsPaginated(
   workspace?: string,
   limitValue?: number,
   offsetValue?: number,
+  since?: string,
+  until?: string,
 ): Promise<Paginated<ThreadRecord>> {
   const scope = workspace?.trim() || "default";
   const offsetValueResolved = offset(offsetValue);
-  const visibilityParams: StoreValue[] = [scope, agentId, agentId];
+  const clauses = [visibleMessageClause(true)];
+  const params: StoreValue[] = [scope, agentId, agentId];
+  addDateRange(clauses, params, "m.created_at", since, until);
   const [rows, totalRow] = await Promise.all([
     ctx.all<ThreadRow>(
       `SELECT
@@ -323,19 +334,19 @@ export async function listThreadsPaginated(
            ORDER BY latest.created_at DESC LIMIT 1
          ) AS last_message_body
        FROM messages m
-       WHERE ${visibleMessageClause(true)}
+       WHERE ${clauses.join(" AND ")}
        GROUP BY m.workspace, m.thread_id
        ORDER BY last_message_at DESC
        LIMIT ? OFFSET ?`,
-      [...visibilityParams, limit(limitValue), offsetValueResolved],
+      [...params, limit(limitValue), offsetValueResolved],
     ),
     ctx.get<{ c: number }>(
       `SELECT COUNT(*) AS c FROM (
          SELECT 1 FROM messages m
-         WHERE ${visibleMessageClause(true)}
+         WHERE ${clauses.join(" AND ")}
          GROUP BY m.workspace, m.thread_id
        ) AS threads`,
-      visibilityParams,
+      params,
     ),
   ]);
   const results = rows.map((row) => ({ ...row, message_count: Number(row.message_count) }));

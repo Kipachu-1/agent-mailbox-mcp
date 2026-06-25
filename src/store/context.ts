@@ -38,3 +38,29 @@ export function caseInsensitiveLike(
 ): string {
   return ctx.dialect === "postgres" ? `${column} ILIKE ?` : `${column} LIKE ? COLLATE NOCASE`;
 }
+
+/**
+ * Append optional `since` / `until` (ISO-8601) date-range predicates to a WHERE
+ * clause. Uses the provided column name so each entity filters on its own
+ * timestamp (messages.created_at, tasks.updated_at, notes.updated_at,
+ * locks.updated_at). When both bounds are omitted, nothing is appended — the
+ * previous "all records" behavior is preserved.
+ */
+export function addDateRange(
+  clauses: string[],
+  params: StoreValue[],
+  column: string,
+  since?: string,
+  until?: string,
+): void {
+  const sinceValue = since?.trim();
+  const untilValue = until?.trim();
+  if (sinceValue) {
+    clauses.push(`${column} >= ?`);
+    params.push(sinceValue);
+  }
+  if (untilValue) {
+    clauses.push(`${column} <= ?`);
+    params.push(untilValue);
+  }
+}

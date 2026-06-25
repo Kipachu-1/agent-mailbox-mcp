@@ -195,6 +195,8 @@ export interface InboxOptions {
   includeSent?: boolean;
   channel?: string;
   threadId?: string;
+  since?: string;
+  until?: string;
   limit?: number;
   offset?: number;
 }
@@ -231,6 +233,8 @@ export interface ListTasksOptions {
   channel?: string;
   parentTaskId?: string;
   staleAfterSeconds?: number;
+  since?: string;
+  until?: string;
   limit?: number;
   offset?: number;
 }
@@ -283,6 +287,8 @@ export interface ReadNotesOptions {
   channel?: string;
   pinnedOnly?: boolean;
   query?: string;
+  since?: string;
+  until?: string;
   limit?: number;
   offset?: number;
 }
@@ -299,6 +305,8 @@ export interface ListLocksOptions {
   workspace?: string;
   includeExpired?: boolean;
   resource?: string;
+  since?: string;
+  until?: string;
   limit?: number;
   offset?: number;
 }
