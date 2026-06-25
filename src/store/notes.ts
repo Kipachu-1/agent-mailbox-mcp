@@ -138,6 +138,7 @@ export async function listAllNotes(
   if (options.pinnedOnly) {
     clauses.push("pinned = 1");
   }
+  addDateRange(clauses, params, "updated_at", options.since, options.until);
 
   const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
   params.push(limit(options.limit));

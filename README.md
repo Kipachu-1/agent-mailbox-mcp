@@ -231,10 +231,10 @@ Stale claimed tasks are reclaim candidates only after checking recent presence a
 
 - `send_message`: send a direct or channel message with optional metadata and artifacts.
 - `reply_message`: reply while preserving a thread.
-- `inbox`: list unread or recent visible messages.
+- `inbox`: list unread or recent visible messages. Pass `since`/`until` (ISO-8601) to limit results to a date range.
 - `read_message`: fetch one message and mark it read.
 - `search_messages`: search visible message bodies.
-- `list_threads`: list visible threads.
+- `list_threads`: list visible threads. Pass `since`/`until` (ISO-8601) to limit threads to those with messages in a date range.
 - `get_thread`: read a thread chronologically.
 - `watch_updates`: poll for new messages, tasks, task events, notes, or locks since a timestamp.
 
@@ -242,7 +242,7 @@ Stale claimed tasks are reclaim candidates only after checking recent presence a
 
 - `create_task`: create a claimable handoff task with clear acceptance criteria and artifacts.
 - `create_handoff`: create a task and optional notification message in one workflow call.
-- `list_tasks`: list visible tasks. Use `stale_after_seconds` to find claimed tasks that have not changed recently.
+- `list_tasks`: list visible tasks. Use `stale_after_seconds` to find claimed tasks that have not changed recently. Pass `since`/`until` (ISO-8601) to limit tasks to those last updated within a date range.
 - `get_task`: fetch a single visible task by ID with its artifacts, dependencies, and recent events in one read-only call.
 - `claim_task`: atomically claim an open task in the current workspace.
 - `update_task`: update status and editable fields (title, description, assignee_id, channel, parent_task_id, dependencies, priority, due_at, blocked_reason, status, artifacts) with partial-update semantics. Omitted fields are left unchanged; `null` clears nullable fields. Use `assignee_id` to directly assign or reassign a task. `done`, `blocked`, and `cancelled` updates from another agent automatically notify the creator.
@@ -261,7 +261,7 @@ Stale claimed tasks are reclaim candidates only after checking recent presence a
 - `presign_artifact`: create a short-lived download URL for S3-backed artifact content.
 - `acquire_lock`: acquire or renew a cooperative advisory lease for a resource before editing. This does not prevent file writes by the OS, Git, editors, or shell commands.
 - `release_lock`: release a lock you own.
-- `list_locks`: list active or expired locks.
+- `list_locks`: list active or expired locks. Pass `since`/`until` (ISO-8601) to limit locks to those last updated within a date range.
 
 ## CLI
 
@@ -329,4 +329,4 @@ bun run typecheck
 ```
 
 SQLite uses WAL mode and `busy_timeout` so multiple MCP sessions and local CLI calls can share the same database safely. Postgres integration tests are gated by `AGENT_MAILBOX_TEST_DATABASE_URL`.
-o multiple MCP sessions and local CLI calls can share the same database safely. Postgres integration tests are gated by `AGENT_MAILBOX_TEST_DATABASE_URL`.
+

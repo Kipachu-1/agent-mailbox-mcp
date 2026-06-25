@@ -320,7 +320,6 @@ export async function listThreadsPaginated(
   const clauses = [visibleMessageClause(true)];
   const params: StoreValue[] = [scope, agentId, agentId];
   addDateRange(clauses, params, "m.created_at", since, until);
-  const visibilityParams = params;
   const [rows, totalRow] = await Promise.all([
     ctx.all<ThreadRow>(
       `SELECT
@@ -339,7 +338,7 @@ export async function listThreadsPaginated(
        GROUP BY m.workspace, m.thread_id
        ORDER BY last_message_at DESC
        LIMIT ? OFFSET ?`,
-      [...visibilityParams, limit(limitValue), offsetValueResolved],
+      [...params, limit(limitValue), offsetValueResolved],
     ),
     ctx.get<{ c: number }>(
       `SELECT COUNT(*) AS c FROM (
@@ -347,7 +346,7 @@ export async function listThreadsPaginated(
          WHERE ${clauses.join(" AND ")}
          GROUP BY m.workspace, m.thread_id
        ) AS threads`,
-      visibilityParams,
+      params,
     ),
   ]);
   const results = rows.map((row) => ({ ...row, message_count: Number(row.message_count) }));

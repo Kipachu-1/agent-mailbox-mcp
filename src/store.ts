@@ -380,7 +380,9 @@ export class LocalCommsStore {
     return locksStore.listLocksPaginated(this.context(), options);
   }
 
-  async listAllLocks(options: Pick<ListLocksOptions, "includeExpired"> = {}): Promise<LockRecord[]> {
+  async listAllLocks(
+    options: Pick<ListLocksOptions, "includeExpired" | "since" | "until"> = {},
+  ): Promise<LockRecord[]> {
     return locksStore.listAllLocks(this.context(), options);
   }
 
